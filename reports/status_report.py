@@ -33,7 +33,7 @@ def run():
 
     col1, col2 = st.columns(2)
     with col1:
-        owner_name = st.text_input("Exact Owner / Applicant Name", placeholder="e.g. ABC BREWING")
+        owner_name = st.text_input("Exact Owner / Applicant Name", placeholder="e.g. ABC Brewing Co.")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
 
@@ -57,8 +57,12 @@ def run():
 
         with st.spinner("Scraping USPTO trademark records..."):
             try:
+                # --- Chromium launched with Docker memory fixes ---
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-dev-shm-usage']
+                    )
                     page = browser.new_page()
                     excel_out = f"temp_{owner_name.replace(' ', '_')}.xlsx"
                     raw_results = scrape_uspto(
@@ -122,7 +126,7 @@ def run():
         </html>
         """
         
-# 2. Generate PDF
+        # 2. Generate PDF
         class PDF(FPDF):
             def header(self):
                 # --- Embed Logo ---
@@ -142,7 +146,7 @@ def run():
                 
                 self.set_x(45)
                 self.cell(0, 5, f'Date Generated: {datetime.now().strftime("%B %d, %Y")}', 0, 1, 'L')
-                self.ln(10) # Add a line break below the header
+                self.ln(10)
 
         pdf = PDF(orientation='P') # Set to Portrait
         pdf.add_page()

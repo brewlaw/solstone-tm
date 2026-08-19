@@ -16,7 +16,6 @@ OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# --- RESTORED: Dynamic Naming Function ---
 def get_dynamic_names(timeframe, raw_mark):
     today = datetime.date.today()
     current_year = today.year
@@ -175,7 +174,7 @@ def run():
 
         with st.spinner("Scraping USPTO, TTB, and Google... This may take 1-2 minutes."):
             try:
-                # --- RESTORED: Custom Playwright Browser Arguments ---
+                # --- Chromium launched with Docker memory fixes ---
                 with sync_playwright() as p:
                     browser = p.chromium.launch(
                         headless=True, 
@@ -183,7 +182,9 @@ def run():
                             '--disable-popup-blocking', 
                             '--disable-notifications', 
                             '--disable-infobars',
-                            '--disable-custom-protocol-handlers' 
+                            '--disable-custom-protocol-handlers',
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage'
                         ]
                     )
                     
