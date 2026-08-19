@@ -30,11 +30,11 @@ def run():
 
     col1, col2 = st.columns(2)
     with col1:
-        owner_name = st.text_input("Exact Owner / Applicant Name", placeholder="e.g. Virginia Ciderworks")
+        owner_name = st.text_input("Exact Owner / Applicant Name", placeholder="e.g. ABC BREWING")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
 
-    exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. HAZY HOPPED")
+    exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
 
     if st.button("Generate Status Report", type="primary"):
         if not owner_name.strip():
