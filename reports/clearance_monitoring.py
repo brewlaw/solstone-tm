@@ -174,8 +174,8 @@ def run():
 
         with st.spinner("Scraping USPTO, TTB, and Google... This may take 1-2 minutes."):
             try:
-                # --- Chromium launched with Docker memory fixes ---
                 with sync_playwright() as p:
+                    # --- 1. Run USPTO Search ---
                     browser = p.chromium.launch(
                         headless=True, 
                         args=[
@@ -184,21 +184,39 @@ def run():
                             '--disable-infobars',
                             '--disable-custom-protocol-handlers',
                             '--no-sandbox',
-                            '--disable-dev-shm-usage'
+                            '--disable-dev-shm-usage',
+                            '--disable-gpu',
+                            '--single-process'
                         ]
                     )
-                    
                     context = browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         accept_downloads=True,
-                        permissions=[] 
+                        permissions=[]
                     )
                     page = context.new_page()
-
                     uspto_data = scrape_uspto(page, primary_uspto_query, excel_filename, secondary_uspto_query)
-                    ttb_data = scrape_ttb(page, ttb_date_from, ttb_date_to, list(set(ttb_marks_list)))
-                    browser.close()
+                    browser.close() # 🧹 Force close to flush RAM!
 
+                    # --- 2. Run TTB Search in a fresh browser ---
+                    browser = p.chromium.launch(
+                        headless=True, 
+                        args=[
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-gpu',
+                            '--single-process'
+                        ]
+                    )
+                    context = browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        accept_downloads=True
+                    )
+                    page = context.new_page()
+                    ttb_data = scrape_ttb(page, ttb_date_from, ttb_date_to, list(set(ttb_marks_list)))
+                    browser.close() # 🧹 Force close to flush RAM!
+
+                # --- 3. Run Google Search (Does not use Playwright) ---
                 google_data = scrape_google(web_mark_base, raw_mark, google_date_from, google_date_to)
 
                 # Report Generation
