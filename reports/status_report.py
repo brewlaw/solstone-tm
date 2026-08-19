@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import tempfile
+from fpdf import FPDF
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from playwright.sync_api import sync_playwright
@@ -90,7 +92,11 @@ def run():
         st.success(f"Found {len(report_df)} mark(s)!")
         st.dataframe(report_df, use_container_width=True)
 
-        # Download HTML report
+        # ----------------------------------------
+        # REPORT GENERATION (HTML & PDF)
+        # ----------------------------------------
+        
+        # 1. Generate HTML
         html_table = report_df.to_html(index=False, escape=False)
         html_report = f"""
         <html>
@@ -115,9 +121,71 @@ def run():
         </html>
         """
         
-        st.download_button(
-            label="Download HTML Report",
-            data=html_report,
-            file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.html",
-            mime="text/html"
-        )
+        # 2. Generate PDF
+        class PDF(FPDF):
+            def header(self):
+                self.set_font('Arial', 'B', 15)
+                self.set_text_color(47, 84, 150)
+                self.cell(0, 10, 'Trademark Status Report', 0, 1, 'L')
+                self.set_font('Arial', '', 10)
+                self.set_text_color(51, 51, 51)
+                self.cell(0, 6, f'Owner Searched: {owner_name}', 0, 1, 'L')
+                self.cell(0, 6, f'Date Generated: {datetime.now().strftime("%B %d, %Y")}', 0, 1, 'L')
+                self.ln(5)
+
+        pdf = PDF(orientation='L')
+        pdf.add_page()
+        pdf.set_font('Arial', 'B', 9)
+        pdf.set_fill_color(242, 242, 242)
+        
+        # Setup Table Columns
+        headers = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Reg Date', 'Goods/Services']
+        col_widths = [45, 20, 20, 15, 45, 20, 110]
+        
+        for i in range(len(headers)):
+            pdf.cell(col_widths[i], 8, headers[i], 1, 0, 'C', 1)
+        pdf.ln()
+        
+        # Add Data to PDF Table
+        pdf.set_font('Arial', '', 8)
+        for _, row in report_df.iterrows():
+            def clean(val, max_len):
+                # Clean unsupported characters and truncate long strings so the table doesn't break
+                cleaned = str(val).replace('“', '"').replace('”', '"').replace("’", "'").encode('latin-1', 'replace').decode('latin-1')
+                return cleaned[:max_len] + "..." if len(cleaned) > max_len else cleaned
+                
+            pdf.cell(col_widths[0], 8, clean(row['Mark'], 25), 1)
+            pdf.cell(col_widths[1], 8, clean(row['S/N'], 12), 1)
+            pdf.cell(col_widths[2], 8, clean(row['R/N'], 10), 1)
+            pdf.cell(col_widths[3], 8, clean(row['Status'], 10), 1)
+            pdf.cell(col_widths[4], 8, clean(row['Next Deadline'], 30), 1)
+            pdf.cell(col_widths[5], 8, clean(row['Registration Date'], 12), 1)
+            pdf.cell(col_widths[6], 8, clean(row['Goods & Services'], 75), 1)
+            pdf.ln()
+            
+        # Save PDF to temporary memory
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            with open(tmp.name, "rb") as f:
+                pdf_bytes = f.read()
+
+        # 3. Display Side-by-Side Download Buttons
+        dl_col1, dl_col2 = st.columns(2)
+        
+        with dl_col1:
+            st.download_button(
+                label="📄 Download HTML Report",
+                data=html_report,
+                file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.html",
+                mime="text/html",
+                use_container_width=True
+            )
+            
+        with dl_col2:
+            st.download_button(
+                label="📥 Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
