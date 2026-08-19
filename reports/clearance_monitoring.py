@@ -239,7 +239,7 @@ def run():
                 report_date = today.strftime("%B %d, %Y")
 
                 page_data = generate_pdf(raw_mark, squished_mark, ttb_date_from, ttb_date_to, uspto_data, ttb_data, google_data, pdf_filename, report_title)
-                generate_docx_2(client_name, attention_name, client_email, report_date, raw_mark, report_title, page_data, docx_filename)
+                generate_docx_2(client_name, attention_name, client_email, report_date, raw_mark, report_title, page_data, feedback_summary, docx_filename)
 
                 st.success("Search & Report Generation Complete!")
 
