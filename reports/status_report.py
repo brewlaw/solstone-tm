@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import tempfile
+import os
 from fpdf import FPDF
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -121,17 +122,27 @@ def run():
         </html>
         """
         
-        ## 2. Generate PDF
+# 2. Generate PDF
         class PDF(FPDF):
             def header(self):
+                # --- Embed Logo ---
+                if os.path.exists("logo.jpg"):
+                    self.image("logo.jpg", 10, 8, 30) # x, y, width in mm
+                
+                # --- Shift text to the right (x=45) ---
+                self.set_x(45) 
                 self.set_font('Arial', 'B', 15)
                 self.set_text_color(47, 84, 150)
                 self.cell(0, 8, 'Trademark Status Report', 0, 1, 'L')
+                
+                self.set_x(45)
                 self.set_font('Arial', '', 10)
                 self.set_text_color(51, 51, 51)
                 self.cell(0, 5, f'Owner Searched: {owner_name}', 0, 1, 'L')
+                
+                self.set_x(45)
                 self.cell(0, 5, f'Date Generated: {datetime.now().strftime("%B %d, %Y")}', 0, 1, 'L')
-                self.ln(3)
+                self.ln(10) # Add a line break below the header
 
         pdf = PDF(orientation='P') # Set to Portrait
         pdf.add_page()
