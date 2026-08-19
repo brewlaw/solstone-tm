@@ -176,20 +176,19 @@ def run():
         with st.spinner("Scraping USPTO, TTB, and Google... This may take 1-2 minutes."):
             try:
                 with sync_playwright() as p:
-                    # --- 1. Run USPTO Search (With Native Stealth) ---
-                    browser = p.chromium.launch(
-                        headless=True, 
-                        args=[
-                            '--disable-popup-blocking', 
-                            '--disable-notifications', 
-                            '--disable-infobars',
-                            '--disable-custom-protocol-handlers',
-                            '--no-sandbox',
-                            '--disable-dev-shm-usage',
-                            '--disable-gpu',
-                            '--disable-blink-features=AutomationControlled'
-                        ]
-                    )
+                    # --- The Golden Cloud Server Flags ---
+                    cloud_args = [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-gpu',
+                        '--single-process',
+                        '--no-zygote',
+                        '--disable-blink-features=AutomationControlled'
+                    ]
+
+                    # --- 1. Run USPTO Search ---
+                    browser = p.chromium.launch(headless=True, args=cloud_args)
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         accept_downloads=True,
@@ -197,7 +196,7 @@ def run():
                     )
                     page = context.new_page()
                     
-                    # THE MEMORY DIET: Block heavy images, media, and fonts from loading
+                    # THE MEMORY DIET: Block heavy images, media, and fonts
                     page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
                     
                     uspto_data = scrape_uspto(page, primary_uspto_query, excel_filename, secondary_uspto_query)
@@ -207,23 +206,15 @@ def run():
                     browser.close() 
                     gc.collect() # Force Python to flush the RAM
 
-                    # --- 2. Run TTB Search in a fresh browser ---
-                    browser = p.chromium.launch(
-                        headless=True, 
-                        args=[
-                            '--no-sandbox',
-                            '--disable-dev-shm-usage',
-                            '--disable-gpu',
-                            '--disable-blink-features=AutomationControlled'
-                        ]
-                    )
+                    # --- 2. Run TTB Search ---
+                    browser = p.chromium.launch(headless=True, args=cloud_args)
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         accept_downloads=True
                     )
                     page = context.new_page()
                     
-                    # THE MEMORY DIET: Block heavy images, media, and fonts from loading
+                    # THE MEMORY DIET: Block heavy images, media, and fonts
                     page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
                     
                     ttb_data = scrape_ttb(page, ttb_date_from, ttb_date_to, list(set(ttb_marks_list)))
