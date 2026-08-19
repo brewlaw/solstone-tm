@@ -44,31 +44,38 @@ class Section2EAnalyzer:
         return term_dict
 
     def _load_surname_csv(self, filepath):
-        """Specifically handles the US Census dataset headers."""
+        """Specifically handles the US Census dataset headers and applies a rarity threshold."""
         term_dict = {}
+        threshold = 1000  # Ignore any surname with fewer than 1,000 people
+        
         try:
             with open(filepath, mode='r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     name = row.get('name', '').strip().upper()
                     if name:
-                        count = row.get('count', 'an unknown number of')
+                        count = row.get('count', '0')
                         try:
                             count_int = int(count)
-                            if count_int < 100:
-                                rarity = "very rare"
-                            elif count_int <= 500:
+                            
+                            # Skip if the name doesn't meet our threshold
+                            if count_int < threshold:
+                                continue
+                                
+                            if count_int <= 5000:
                                 rarity = "somewhat rare"
-                            elif count_int <= 1000:
+                            elif count_int <= 25000:
                                 rarity = "relatively common"
                             else:
-                                rarity = "common"
+                                rarity = "very common"
                         except ValueError:
+                            count_int = 0
                             rarity = "known"
+                            continue # Skip invalid rows
 
                         term_dict[name] = {
                             "Category": "Surname 2(e)(4)",
-                            "Count": count,
+                            "Count": f"{count_int:,}", # Formats with commas (e.g., 1,500)
                             "Rarity": rarity
                         }
         except Exception as e:
@@ -111,7 +118,11 @@ class Section2EAnalyzer:
             for category, matches in results.items():
                 for match in matches:
                     friendly_cat = category.split('_')[0].capitalize()
-                    feedback.append(f"Monitoring Context: Because '{match['Matched_Term']}' is a {friendly_cat} term, it may exist in a 'crowded field'. Enforcement should focus strictly on identical goods/services.")
+                    
+                    if category == "surname_2e4":
+                        feedback.append(f"Monitoring Context: '{match['Matched_Term']}' is a registered Surname ({match.get('Count')} people). It may exist in a 'crowded field', so enforcement should focus on identical goods/services.")
+                    else:
+                        feedback.append(f"Monitoring Context: Because '{match['Matched_Term']}' is a {friendly_cat} term, it may exist in a 'crowded field'. Enforcement should focus strictly on identical goods/services.")
                     
         if not feedback:
             feedback.append("No immediate Section 2(e) issues detected in dictionaries.")
