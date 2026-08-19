@@ -4,3 +4,4 @@ playwright
 python-dateutil
 openpyxl
 fpdf
+python-docx
