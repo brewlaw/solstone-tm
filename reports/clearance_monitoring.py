@@ -176,7 +176,7 @@ def run():
         with st.spinner("Scraping USPTO, TTB, and Google... This may take 1-2 minutes."):
             try:
                 with sync_playwright() as p:
-                    # --- 1. Run USPTO Search ---
+                    # --- 1. Run USPTO Search (With Native Stealth) ---
                     browser = p.chromium.launch(
                         headless=True, 
                         args=[
@@ -187,11 +187,11 @@ def run():
                             '--no-sandbox',
                             '--disable-dev-shm-usage',
                             '--disable-gpu',
-                            '--single-process'
+                            '--disable-blink-features=AutomationControlled'
                         ]
                     )
                     context = browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         accept_downloads=True,
                         permissions=[]
                     )
@@ -214,11 +214,11 @@ def run():
                             '--no-sandbox',
                             '--disable-dev-shm-usage',
                             '--disable-gpu',
-                            '--single-process'
+                            '--disable-blink-features=AutomationControlled'
                         ]
                     )
                     context = browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         accept_downloads=True
                     )
                     page = context.new_page()
