@@ -1,3 +1,6 @@
+import os
+os.system("playwright install chromium")
+
 import streamlit as st
 from reports import status_report, clearance_monitoring
 
