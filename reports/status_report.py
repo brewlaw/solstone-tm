@@ -121,47 +121,84 @@ def run():
         </html>
         """
         
-        # 2. Generate PDF
+        ## 2. Generate PDF
         class PDF(FPDF):
             def header(self):
                 self.set_font('Arial', 'B', 15)
                 self.set_text_color(47, 84, 150)
-                self.cell(0, 10, 'Trademark Status Report', 0, 1, 'L')
+                self.cell(0, 8, 'Trademark Status Report', 0, 1, 'L')
                 self.set_font('Arial', '', 10)
                 self.set_text_color(51, 51, 51)
-                self.cell(0, 6, f'Owner Searched: {owner_name}', 0, 1, 'L')
-                self.cell(0, 6, f'Date Generated: {datetime.now().strftime("%B %d, %Y")}', 0, 1, 'L')
-                self.ln(5)
+                self.cell(0, 5, f'Owner Searched: {owner_name}', 0, 1, 'L')
+                self.cell(0, 5, f'Date Generated: {datetime.now().strftime("%B %d, %Y")}', 0, 1, 'L')
+                self.ln(3)
 
-        pdf = PDF(orientation='L')
+        pdf = PDF(orientation='P') # Set to Portrait
         pdf.add_page()
-        pdf.set_font('Arial', 'B', 9)
+        pdf.set_font('Arial', 'B', 8)
         pdf.set_fill_color(242, 242, 242)
         
-        # Setup Table Columns
-        headers = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Reg Date', 'Goods/Services']
-        col_widths = [45, 20, 20, 15, 45, 20, 110]
+        # Setup Table Columns for Portrait (190mm total width)
+        headers = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Reg Date', 'Goods']
+        col_widths = [35, 17, 17, 13, 35, 18, 55] 
         
         for i in range(len(headers)):
             pdf.cell(col_widths[i], 8, headers[i], 1, 0, 'C', 1)
         pdf.ln()
         
         # Add Data to PDF Table
-        pdf.set_font('Arial', '', 8)
+        pdf.set_font('Arial', '', 7)
+        line_height = 4
+        
         for _, row in report_df.iterrows():
-            def clean(val, max_len):
-                # Clean unsupported characters and truncate long strings so the table doesn't break
-                cleaned = str(val).replace('“', '"').replace('”', '"').replace("’", "'").encode('latin-1', 'replace').decode('latin-1')
-                return cleaned[:max_len] + "..." if len(cleaned) > max_len else cleaned
+            def clean(val):
+                # Clean unsupported characters
+                return str(val).replace('“', '"').replace('”', '"').replace("’", "'").encode('latin-1', 'replace').decode('latin-1')
+            
+            texts = [
+                clean(row['Mark']),
+                clean(row['S/N']),
+                clean(row['R/N']),
+                clean(row['Status']),
+                clean(row['Next Deadline']),
+                clean(row['Registration Date']),
+                clean(row['Goods & Services'])
+            ]
+            
+            # Calculate row height based on text wrapping
+            max_lines = 1
+            for i, text in enumerate(texts):
+                text_width = pdf.get_string_width(text)
+                # Calculate how many lines this specific text will take up
+                lines = max(1, int((text_width * 1.05) / (col_widths[i] - 2)) + 1)
+                if lines > max_lines:
+                    max_lines = lines
+                    
+            row_height = max_lines * line_height
+            
+            # Check if we need a page break before drawing the row
+            if pdf.get_y() + row_height > 275:
+                pdf.add_page()
+            
+            x_start = pdf.get_x()
+            y_start = pdf.get_y()
+            
+            # Draw cells
+            for i, text in enumerate(texts):
+                # 1. Draw the border rectangle
+                pdf.rect(x_start, y_start, col_widths[i], row_height)
                 
-            pdf.cell(col_widths[0], 8, clean(row['Mark'], 25), 1)
-            pdf.cell(col_widths[1], 8, clean(row['S/N'], 12), 1)
-            pdf.cell(col_widths[2], 8, clean(row['R/N'], 10), 1)
-            pdf.cell(col_widths[3], 8, clean(row['Status'], 10), 1)
-            pdf.cell(col_widths[4], 8, clean(row['Next Deadline'], 30), 1)
-            pdf.cell(col_widths[5], 8, clean(row['Registration Date'], 12), 1)
-            pdf.cell(col_widths[6], 8, clean(row['Goods & Services'], 75), 1)
-            pdf.ln()
+                # 2. Position cursor inside the rectangle with 1mm padding
+                pdf.set_xy(x_start + 1, y_start + 1)
+                
+                # 3. Print the wrapping text without drawing new borders
+                align = 'L' if i in [0, 4, 6] else 'C' # Left align Mark, Deadline, Goods
+                pdf.multi_cell(col_widths[i] - 2, line_height - 0.5, text, border=0, align=align)
+                
+                x_start += col_widths[i]
+            
+            # Reset cursor to the next line
+            pdf.set_xy(10, y_start + row_height)
             
         # Save PDF to temporary memory
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
