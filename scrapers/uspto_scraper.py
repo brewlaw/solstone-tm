@@ -3,9 +3,14 @@ import re
 import time
 import pandas as pd
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import stealth_sync
 
 def scrape_uspto(page, primary_query, excel_filename, secondary_query=None, target_classes=None, max_retries=3):
     print("\nLaunching browser for USPTO Trademark Search...")
+    
+    # 🥷 INJECT STEALTH EVASION TACTICS
+    # This strips away the "I am a bot" flags and makes the cloud server look like a human
+    stealth_sync(page)
     
     print("  -> Executing Primary USPTO Search...")
     primary_df, p_raw = _run_single_search(page, primary_query, max_retries)
@@ -129,7 +134,8 @@ def _run_single_search(page, search_query, max_retries=3):
     attempt = 0
     while attempt < max_retries:
         try:
-            page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=30000, wait_until="domcontentloaded")
+            # Slightly increased the timeout to give the cloud server more breathing room
+            page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=45000, wait_until="domcontentloaded")
             time.sleep(2)
 
             search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
