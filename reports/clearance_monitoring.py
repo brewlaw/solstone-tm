@@ -1,5 +1,6 @@
 import os
 import re
+import gc
 import datetime
 from datetime import timedelta
 import streamlit as st
@@ -162,7 +163,7 @@ def run():
             secondary_terms.append(f"(CM2:*{substring_term}*)")
             ttb_marks_list.append(f"%{substring_term}%")
 
-        class_filter = " AND IC:(\"030\" OR \"032\" OR \"033\" OR \"043\")"
+        class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
         date_filter = "" if use_all_time else f" AND FD:[{uspto_date_from} TO {uspto_date_to}]"
 
         primary_uspto_query = f"({uspto_mark}){class_filter}{date_filter}"
@@ -195,8 +196,16 @@ def run():
                         permissions=[]
                     )
                     page = context.new_page()
+                    
+                    # THE MEMORY DIET: Block heavy images, media, and fonts from loading
+                    page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
+                    
                     uspto_data = scrape_uspto(page, primary_uspto_query, excel_filename, secondary_uspto_query)
-                    browser.close() # 🧹 Force close to flush RAM!
+                    
+                    # Aggressive Cleanup
+                    context.close()
+                    browser.close() 
+                    gc.collect() # Force Python to flush the RAM
 
                     # --- 2. Run TTB Search in a fresh browser ---
                     browser = p.chromium.launch(
@@ -213,8 +222,16 @@ def run():
                         accept_downloads=True
                     )
                     page = context.new_page()
+                    
+                    # THE MEMORY DIET: Block heavy images, media, and fonts from loading
+                    page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
+                    
                     ttb_data = scrape_ttb(page, ttb_date_from, ttb_date_to, list(set(ttb_marks_list)))
-                    browser.close() # 🧹 Force close to flush RAM!
+                    
+                    # Aggressive Cleanup
+                    context.close()
+                    browser.close() 
+                    gc.collect()
 
                 # --- 3. Run Google Search (Does not use Playwright) ---
                 google_data = scrape_google(web_mark_base, raw_mark, google_date_from, google_date_to)
