@@ -3,5 +3,5 @@ pandas
 playwright
 python-dateutil
 openpyxl
-fpdf
+fpdf2
 python-docx
