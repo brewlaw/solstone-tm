@@ -171,32 +171,39 @@ def run():
         else:
             web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
 
-        # Build USPTO Queries (Uses cleaned core tokens)
+        # Build Primary USPTO Query (Core terms)
         uspto_spaced = " AND ".join([f"CM2:{w}*" for w in core_words])
         uspto_mark = f"({uspto_spaced}) OR (CM2:{core_squished}*)"
         
-        # Build TTB Queries (Uses cleaned core tokens)
-        ttb_marks_list = ["%" + "%".join(core_words) + "%"]
+        # Build Primary TTB Query List
+        ttb_marks_list = [raw_mark.replace(" IPA", "").replace(" BEER", "").replace(" WINE", "").strip()]
+        if clean_phrase and clean_phrase not in ttb_marks_list:
+            ttb_marks_list.append(clean_phrase)
 
+        # Build Expansion Terms with Full Wildcards (*TERM* for USPTO and %TERM% for TTB)
         secondary_terms = []
         if dominant_term:
             web_mark_base += f' OR "{dominant_term}"'
-            secondary_terms.append(f"(CM2:{dominant_term}*)")
+            secondary_terms.append(f"(CM2:*{dominant_term}*)")
             ttb_marks_list.append(f"%{dominant_term}%")
+            
         if phonetic_term:
             web_mark_base += f' OR "{phonetic_term}"'
-            secondary_terms.append(f"(CM2:{phonetic_term}*)")
+            secondary_terms.append(f"(CM2:*{phonetic_term}*)")
             ttb_marks_list.append(f"%{phonetic_term}%")
+            
         if conceptual_term:
             web_mark_base += f' OR "{conceptual_term}"'
-            secondary_terms.append(f"(CM2:{conceptual_term}*)")
+            secondary_terms.append(f"(CM2:*{conceptual_term}*)")
             ttb_marks_list.append(f"%{conceptual_term}%")
+            
         if substring_term:
             web_mark_base += f' OR "{substring_term}"'
             secondary_terms.append(f"(CM2:*{substring_term}*)")
             ttb_marks_list.append(f"%{substring_term}%")
 
-        class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
+        # Modern Cloud USPTO Class Filter Syntax
+        class_filter = ' AND (IC:030 OR IC:032 OR IC:033 OR IC:043)'
         date_filter = "" if use_all_time else f" AND FD:[{uspto_date_from} TO {uspto_date_to}]"
 
         primary_uspto_query = f"({uspto_mark}){class_filter}{date_filter}"
