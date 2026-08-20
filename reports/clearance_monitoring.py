@@ -76,6 +76,7 @@ def run():
     st.write("Run deep clearance searches or time-constrained monitoring across USPTO, TTB, and Google.")
 
     analyzer = Section2EAnalyzer(data_dir="data")
+    feedback_summary = []
 
     report_type = st.selectbox("Select Report Type:", ["Clearance", "Monitoring"])
     raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
@@ -239,17 +240,19 @@ def run():
                 report_date = today.strftime("%B %d, %Y")
 
                 page_data = generate_pdf(raw_mark, squished_mark, ttb_date_from, ttb_date_to, uspto_data, ttb_data, google_data, pdf_filename, report_title)
+                
+                # Generate Word Doc using explicit keyword arguments
                 generate_docx_2(
-    client_name,
-    attention_name,
-    client_email,
-    report_date,
-    raw_mark,
-    report_title,
-    page_data,
-    feedback_summary,
-    docx_filename,
-)
+                    client_name=client_name,
+                    attention_name=attention_name,
+                    email=client_email,
+                    report_date=report_date,
+                    raw_mark=raw_mark,
+                    report_title=report_title,
+                    page_data=page_data,
+                    output_filename=docx_filename,
+                    feedback_summary=feedback_summary
+                )
 
                 st.success("Search & Report Generation Complete!")
 
