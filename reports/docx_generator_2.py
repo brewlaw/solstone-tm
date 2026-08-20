@@ -4,21 +4,13 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_BREAK
 
-# Initialize doc at the start of the function
-try:
-    doc = Document("letterhead_template.docx")
-except Exception:
-    doc = Document() # Fallback to a blank document if template is missing
-    
-def generate_docx_2(client_name, attention_name, email, report_date, raw_mark, report_title, page_data, output_filename, feedback_summary):
+def generate_docx_2(client_name, attention_name, email, report_date, raw_mark, report_title, page_data, output_filename, feedback_summary, use_letterhead=False):
     print("\nDrafting DOCX Legal Opinion Template (v2.0)...")
     
-    # Load your pre-made letterhead template
-    template_path = os.path.join(os.getcwd(), 'letterhead_template.docx')
-    try:
-        document = Document(template_path)
-    except FileNotFoundError:
-        print("🚨 'letterhead_template.docx' not found! Falling back to a blank white document.")
+    # Load your pre-made letterhead template if requested, otherwise start blank
+    if use_letterhead and os.path.exists("letterhead_template.docx"):
+        document = Document("letterhead_template.docx")
+    else:
         document = Document()
 
     # --- PAGE 1: HEADER & METADATA ---
@@ -65,7 +57,7 @@ def generate_docx_2(client_name, attention_name, email, report_date, raw_mark, r
     # Loop through the RAG feedback and create bullet points
     if feedback_summary:
         for statement in feedback_summary:
-            doc.add_paragraph(f"• {statement}")
+            document.add_paragraph(f"• {statement}")
     else:
         document.add_paragraph("No immediate Section 2(e) issues detected in dictionaries.")
 

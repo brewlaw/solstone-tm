@@ -26,6 +26,7 @@ def run():
     with col1:
         client_name = st.text_input("Client Name:")
         attention_name = st.text_input("Attention Name (e.g. Adeline Druart):")
+        use_letterhead = st.checkbox("📄 Export Word Doc on Firm Letterhead", value=False)
     with col2:
         client_email = st.text_input("Client Email(s):")
 
@@ -160,7 +161,8 @@ def run():
                     report_title=report_title,
                     page_data=page_data,
                     output_filename=docx_filename,
-                    feedback_summary=[]
+                    feedback_summary=[],
+                    use_letterhead=use_letterhead
                 )
 
                 with open(pdf_filename, "rb") as f:
