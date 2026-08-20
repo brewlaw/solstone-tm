@@ -11,6 +11,7 @@ from scrapers.ttb_scraper import scrape_ttb
 from scrapers.google_scraper import scrape_google
 from reports.pdf_generator import generate_pdf
 from reports.docx_generator_2 import generate_docx_2 
+from utils.saved_searches import get_saved_searches, save_search_config
 
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
@@ -75,25 +76,83 @@ def run():
     if 'monitoring_report_data' not in st.session_state:
         st.session_state['monitoring_report_data'] = None
 
+    # --- SAVED MONITORING PROFILES ---
+    saved_profiles = get_saved_searches()
+    
+    active_profile_key = st.session_state.get('load_monitoring_key', "-- Select a Saved Monitoring Profile --")
+    if active_profile_key not in ["-- Select a Saved Monitoring Profile --"] + list(saved_profiles.keys()):
+        active_profile_key = "-- Select a Saved Monitoring Profile --"
+
+    col_profile, col_profile_info = st.columns([3, 2])
+    with col_profile:
+        selected_profile = st.selectbox(
+            "📂 Load Saved Monitoring Profile:",
+            ["-- Select a Saved Monitoring Profile --"] + list(saved_profiles.keys()),
+            index=(["-- Select a Saved Monitoring Profile --"] + list(saved_profiles.keys())).index(active_profile_key)
+        )
+    
+    if 'load_monitoring_key' in st.session_state:
+        del st.session_state['load_monitoring_key']
+
+    p_data = saved_profiles.get(selected_profile, {})
+    with col_profile_info:
+        if selected_profile != "-- Select a Saved Monitoring Profile --":
+            st.info(f"🕒 **Last Ran:** {p_data.get('last_run', 'Never')}")
+
+    # Set default values based on loaded profile
+    def_client = p_data.get('client_name', '')
+    def_attn = p_data.get('attention_name', '')
+    def_email = p_data.get('client_email', '')
+    def_lookback = float(p_data.get('lookback_years', 1.0))
+    def_mark = p_data.get('raw_mark', '')
+    def_dom = p_data.get('dominant_term', '')
+    def_phon = p_data.get('phonetic_term', '')
+    def_conc = p_data.get('conceptual_term', '')
+    def_sub = p_data.get('substring_term', '')
+
     col1, col2 = st.columns(2)
     with col1:
-        client_name = st.text_input("Client Name:")
-        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):")
+        client_name = st.text_input("Client Name:", value=def_client)
+        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):", value=def_attn)
     with col2:
-        client_email = st.text_input("Client Email(s):")
-        lookback_years = st.number_input("Lookback Years:", min_value=0.1, max_value=5.0, value=1.0, step=0.25)
+        client_email = st.text_input("Client Email(s):", value=def_email)
+        lookback_years = st.number_input("Lookback Years:", min_value=0.1, max_value=5.0, value=def_lookback, step=0.25)
 
-    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
+    raw_mark = st.text_input("Full Trademark Name:", value=def_mark, placeholder="e.g. SUN SHINE (include spaces if applicable)")
 
     st.subheader("Search Term Expansions")
     st.caption("Expand your search to catch variations, sound-alikes, meaning-alikes, and substrings.")
     col_a, col_b = st.columns(2)
     with col_a:
-        dominant_term = st.text_input("Dominant/Core Word (optional):").upper()
-        phonetic_term = st.text_input("Phonetic Equivalent (optional):").upper()
+        dominant_term = st.text_input("Dominant/Core Word (optional):", value=def_dom).upper()
+        phonetic_term = st.text_input("Phonetic Equivalent (optional):", value=def_phon).upper()
     with col_b:
-        conceptual_term = st.text_input("Conceptual Equivalent (optional):").upper()
-        substring_term = st.text_input("Root Substring / Pun (optional):").upper()
+        conceptual_term = st.text_input("Conceptual Equivalent (optional):", value=def_conc).upper()
+        substring_term = st.text_input("Root Substring / Pun (optional):", value=def_sub).upper()
+
+    # --- SAVE PROFILE EXPANDER ---
+    with st.expander("💾 Save / Update Monitoring Profile for Quarterly Sweeps", expanded=False):
+        save_name_default = selected_profile if selected_profile != "-- Select a Saved Monitoring Profile --" else (f"{client_name} - {raw_mark}" if client_name and raw_mark else "")
+        save_profile_name = st.text_input("Monitoring Profile Label:", value=save_name_default, placeholder="e.g. Ocelot Brewing - Quarterly Monitoring")
+        if st.button("💾 Save Monitoring Profile"):
+            if not save_profile_name.strip():
+                st.error("Please enter a profile label.")
+            else:
+                params = {
+                    'raw_mark': raw_mark,
+                    'client_name': client_name,
+                    'attention_name': attention_name,
+                    'client_email': client_email,
+                    'lookback_years': lookback_years,
+                    'dominant_term': dominant_term,
+                    'phonetic_term': phonetic_term,
+                    'conceptual_term': conceptual_term,
+                    'substring_term': substring_term,
+                    'last_run': p_data.get('last_run', 'Not run yet')
+                }
+                save_search_config(save_profile_name.strip(), params)
+                st.success(f"Monitoring profile '{save_profile_name.strip()}' saved!")
+                st.rerun()
 
     if st.button("Run Monitoring Search", type="primary"):
         if not raw_mark.strip():
@@ -212,6 +271,11 @@ def run():
                     pdf_bytes = f.read()
                 with open(docx_filename, "rb") as f:
                     docx_bytes = f.read()
+
+                # Update 'last_run' timestamp if profile is loaded
+                if selected_profile != "-- Select a Saved Monitoring Profile --":
+                    p_data['last_run'] = today.strftime("%B %d, %Y")
+                    save_search_config(selected_profile, p_data)
 
                 st.session_state['monitoring_report_data'] = {
                     'base_filename': base_filename,

@@ -18,21 +18,21 @@ tool = st.sidebar.radio(
     [
         "Trademark Status Report", 
         "Full Clearance Search",
-        "Saved Quarterly Searches",
         "Trademark Monitoring Suite",
+        "Saved Quarterly Monitoring",
         "Section 2(e) Risk Analyzer",
         "Cloud Report Archive"
     ]
 )
 
-def show_saved_searches():
-    st.header("Saved Quarterly Clearance Searches")
-    st.write("Manage client search profiles and trigger re-runs for new quarters.")
+def show_saved_monitoring():
+    st.header("Saved Quarterly Monitoring Profiles")
+    st.write("Manage client monitoring profiles and trigger quarterly sweeps.")
 
     saved_searches = get_saved_searches()
 
     if not saved_searches:
-        st.info("No saved search profiles found. Create one directly within the Full Clearance Search tool.")
+        st.info("No saved monitoring profiles found. Create one directly within the Trademark Monitoring Suite.")
         return
 
     for name, params in saved_searches.items():
@@ -40,14 +40,14 @@ def show_saved_searches():
             col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
             with col1:
                 st.markdown(f"### 📌 {name}")
-                st.caption(f"**Client:** {params.get('client_name', 'N/A')} | **Mark:** {params.get('raw_mark', 'N/A')}")
+                st.caption(f"**Client:** {params.get('client_name', 'N/A')} | **Mark:** {params.get('raw_mark', 'N/A')} | **Lookback:** {params.get('lookback_years', '1.0')} yr(s)")
             with col2:
                 st.write(f"🕒 **Last Ran:**")
                 st.info(params.get('last_run', 'Never'))
             with col3:
-                if st.button("▶️ Load & Run Search", key=f"run_{name}", use_container_width=True):
-                    st.session_state['load_profile_key'] = name
-                    st.session_state['main_tool_router'] = "Full Clearance Search"
+                if st.button("▶️ Load & Run Sweep", key=f"run_{name}", use_container_width=True):
+                    st.session_state['load_monitoring_key'] = name
+                    st.session_state['main_tool_router'] = "Trademark Monitoring Suite"
                     st.rerun()
             with col4:
                 if st.button("🗑️ Delete Profile", key=f"del_prof_{name}", use_container_width=True):
@@ -92,10 +92,10 @@ if tool == "Trademark Status Report":
     status_report.run()
 elif tool == "Full Clearance Search":
     clearance_tool.run()
-elif tool == "Saved Quarterly Searches":
-    show_saved_searches()
 elif tool == "Trademark Monitoring Suite":
     monitoring_tool.run()
+elif tool == "Saved Quarterly Monitoring":
+    show_saved_monitoring()
 elif tool == "Section 2(e) Risk Analyzer":
     section_2e_tool.run()
 elif tool == "Cloud Report Archive":
