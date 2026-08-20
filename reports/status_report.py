@@ -41,6 +41,7 @@ def run():
         exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
+        # Adds some invisible spacing so the checkbox aligns nicely with the other column
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         use_letterhead = st.checkbox("📄 Export Reports on LBL Letterhead", value=False)
 
@@ -176,14 +177,14 @@ def run():
         run.font.color.rgb = RGBColor(47, 84, 150)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-doc.add_paragraph(f"Owner Searched:\t{owner_name}").runs[0].bold = True
+        doc.add_paragraph(f"Owner Searched:\t{owner_name}").runs[0].bold = True
+        # NOTE: Using double \t\t for perfect alignment!
         doc.add_paragraph(f"Class Filter:\t\t{ic_classes if ic_classes else 'All Live Classes'}").runs[0].bold = True
         doc.add_paragraph(f"Date Generated:\t{datetime.now().strftime('%B %d, %Y')}").runs[0].bold = True
         doc.add_paragraph()
 
         table = doc.add_table(rows=1, cols=7)
         
-        # GRACEFUL FALLBACK: Try to apply the style, ignore if it doesn't exist in the letterhead
         try:
             table.style = 'Table Grid'
         except KeyError:
