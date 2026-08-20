@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import tempfile
 import os
+import requests
 from fpdf import FPDF
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -44,7 +45,6 @@ def run():
             st.warning("Please enter an Owner/Applicant Name.")
             return
 
-        # Build query using modern USPTO syntax
         query_parts = [f'ON:"{owner_name.strip().lower()}"', 'LD:true']
         if ic_classes.strip():
             classes = [c.strip().zfill(3) for c in ic_classes.split(",") if c.strip()]
@@ -57,7 +57,6 @@ def run():
 
         with st.spinner("Scraping USPTO trademark records..."):
             try:
-                # --- Chromium launched with Docker memory fixes ---
                 with sync_playwright() as p:
                     browser = p.chromium.launch(
                         headless=True,
@@ -82,26 +81,18 @@ def run():
 
         df = pd.DataFrame(raw_results)
 
-        # Apply exclusions
         if exclude_marks.strip():
             exclusions = [m.strip().upper() for m in exclude_marks.split(",") if m.strip()]
             df = df[~df['mark'].str.upper().isin(exclusions)]
 
-        # Calculate deadlines
         df['next_deadline'] = df['reg_date'].apply(calculate_deadline)
 
-        # Format table for display
         report_df = df[['mark', 'serial', 'reg_number', 'status', 'next_deadline', 'reg_date', 'goods']].copy()
         report_df.columns = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Registration Date', 'Goods & Services']
 
         st.success(f"Found {len(report_df)} mark(s)!")
-        st.dataframe(report_df, use_container_width=True)
+        st.dataframe(report_df, width="stretch")
 
-        # ----------------------------------------
-        # REPORT GENERATION (HTML & PDF)
-        # ----------------------------------------
-        
-        # 1. Generate HTML
         html_table = report_df.to_html(index=False, escape=False)
         html_report = f"""
         <html>
@@ -126,14 +117,11 @@ def run():
         </html>
         """
         
-        # 2. Generate PDF
         class PDF(FPDF):
             def header(self):
-                # --- Embed Logo ---
                 if os.path.exists("logo.jpg"):
-                    self.image("logo.jpg", 10, 8, 30) # x, y, width in mm
+                    self.image("logo.jpg", 10, 8, 30)
                 
-                # --- Shift text to the right (x=45) ---
                 self.set_x(45) 
                 self.set_font('Arial', 'B', 15)
                 self.set_text_color(47, 84, 150)
@@ -148,12 +136,11 @@ def run():
                 self.cell(0, 5, f'Date Generated: {datetime.now().strftime("%B %d, %Y")}', 0, 1, 'L')
                 self.ln(10)
 
-        pdf = PDF(orientation='P') # Set to Portrait
+        pdf = PDF(orientation='P')
         pdf.add_page()
         pdf.set_font('Arial', 'B', 8)
         pdf.set_fill_color(242, 242, 242)
         
-        # Setup Table Columns for Portrait (190mm total width)
         headers = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Reg Date', 'Goods']
         col_widths = [35, 17, 17, 13, 35, 18, 55] 
         
@@ -161,11 +148,8 @@ def run():
             pdf.cell(col_widths[i], 8, headers[i], 1, 0, 'C', 1)
         pdf.ln()
         
-        # Add Data to PDF Table
         pdf.set_font('Arial', '', 7)
         line_height = 4
-        
-        import requests
         
         for _, row in report_df.iterrows():
             def clean(val):
@@ -184,12 +168,10 @@ def run():
                 clean(row['Goods & Services'])
             ]
             
-            # --- Detect Design Mark and Calculate Row Height ---
             is_design_mark = False
             img_path = None
             if raw_mark.startswith("[Image for "):
                 is_design_mark = True
-                # Fetch image from TSDR
                 try:
                     tsdr_url = f"https://tsdr.uspto.gov/img/{serial_num}/large"
                     headers_dict = {"User-Agent": "Mozilla/5.0"}
@@ -201,7 +183,6 @@ def run():
                 except Exception:
                     pass
             
-            # Calculate text row height
             max_lines = 1
             for i, text in enumerate(texts):
                 text_width = pdf.get_string_width(text)
@@ -211,26 +192,21 @@ def run():
                     
             row_height = max_lines * line_height
             
-            # Force row height to fit the image if it's a design mark
             if is_design_mark and img_path:
-                row_height = max(row_height, 20) # Ensure at least 20mm height for the image
+                row_height = max(row_height, 20)
             
-            # Check if we need a page break before drawing the row
             if pdf.get_y() + row_height > 275:
                 pdf.add_page()
             
             x_start = pdf.get_x()
             y_start = pdf.get_y()
             
-            # Draw cells
             for i, text in enumerate(texts):
                 pdf.rect(x_start, y_start, col_widths[i], row_height)
                 pdf.set_xy(x_start + 1, y_start + 1)
                 
-                # --- Embed Image in the first column ---
                 if i == 0 and is_design_mark and img_path:
                     try:
-                        # Center a 15x15mm image within the column bounds
                         img_x = x_start + (col_widths[i] - 15) / 2
                         img_y = y_start + (row_height - 15) / 2
                         pdf.image(img_path, x=img_x, y=img_y, w=15, h=15)
@@ -238,7 +214,6 @@ def run():
                         pdf.multi_cell(col_widths[i] - 2, line_height - 0.5, text, border=0, align='C')
                 else:
                     align = 'L' if i in [0, 4, 6] else 'C'
-                    # Print normal text
                     if not (i == 0 and is_design_mark): 
                         pdf.multi_cell(col_widths[i] - 2, line_height - 0.5, text, border=0, align=align)
                 
@@ -246,11 +221,14 @@ def run():
             
             pdf.set_xy(10, y_start + row_height)
             
-            # Clean up temporary image
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        # 3. Display Side-by-Side Download Buttons
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            with open(tmp.name, "rb") as f:
+                pdf_bytes = f.read()
+
         dl_col1, dl_col2 = st.columns(2)
         
         with dl_col1:
@@ -259,7 +237,7 @@ def run():
                 data=html_report,
                 file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.html",
                 mime="text/html",
-                use_container_width=True
+                width="stretch"
             )
             
         with dl_col2:
@@ -268,5 +246,5 @@ def run():
                 data=pdf_bytes,
                 file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf",
                 mime="application/pdf",
-                use_container_width=True
+                width="stretch"
             )
