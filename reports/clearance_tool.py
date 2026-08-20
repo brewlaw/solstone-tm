@@ -38,7 +38,6 @@ def run():
         attention_name = st.text_input("Attention Name (e.g. Adeline Druart):")
     with col2:
         client_email = st.text_input("Client Email(s):")
-        # Removed lookback years completely for the Clearance Tool
 
     st.subheader("Search Term Expansions")
     st.caption("Expand your search to catch variations, sound-alikes, meaning-alikes, and substrings.")
@@ -83,7 +82,6 @@ def run():
             secondary_terms.append(f"(CM2:*{substring_term}*)")
             ttb_marks_list.append(f"%{substring_term}%")
 
-        # USPTO is all-time, so date_filter is entirely blank
         class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
         date_filter = "" 
 
@@ -126,24 +124,32 @@ def run():
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         accept_downloads=True
                     )
-                    page = context.new_page()
                     
-                    # Define the 15-year blocks to prevent TTB timeouts
                     ttb_chunks = [
                         ("01/01/1985", "12/31/1999"),
                         ("01/01/2000", "12/31/2014"),
                         ("01/01/2015", today.strftime("%m/%d/%Y"))
                     ]
                     
-                    ttb_data = []
+                    raw_ttb_data = []
                     for start_date, end_date in ttb_chunks:
-                        chunk_results = scrape_ttb(page, start_date, end_date, list(set(ttb_marks_list)))
+                        # OPEN A FRESH TAB FOR EVERY SINGLE CHUNK
+                        chunk_page = context.new_page()
+                        
+                        chunk_results = scrape_ttb(chunk_page, start_date, end_date, list(set(ttb_marks_list)))
                         if chunk_results:
-                            ttb_data.extend(chunk_results)
+                            raw_ttb_data.extend(chunk_results)
+                            
+                        # CLOSE THE TAB SO IT DOESN'T INTERFERE WITH THE NEXT CHUNK
+                        chunk_page.close()
                     
                     context.close()
                     browser.close() 
                     gc.collect()
+                    
+                    # Deduplicate TTB data in case a COLA overlaps the chunk dates
+                    unique_ttb = {item['ttb_id']: item for item in raw_ttb_data}
+                    ttb_data = list(unique_ttb.values())
 
                 # --- 3. Run Google Search ---
                 google_date_from = "1900-01-01"
@@ -157,7 +163,6 @@ def run():
                 docx_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.docx")
                 report_date = today.strftime("%B %d, %Y")
 
-                # Pass 1985 as the start date to the PDF generator so the header reflects the full timeline
                 page_data = generate_pdf(raw_mark, squished_mark, "01/01/1985", today.strftime("%m/%d/%Y"), uspto_data, ttb_data, google_data, pdf_filename, report_title)
                 
                 generate_docx_2(
