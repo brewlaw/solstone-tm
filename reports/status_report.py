@@ -41,7 +41,6 @@ def run():
         exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
-        # Adds some invisible spacing so the checkbox aligns nicely with the other column
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         use_letterhead = st.checkbox("📄 Export Reports on LBL Letterhead", value=False)
 
@@ -183,7 +182,13 @@ def run():
         doc.add_paragraph()
 
         table = doc.add_table(rows=1, cols=7)
-        table.style = 'Table Grid'
+        
+        # GRACEFUL FALLBACK: Try to apply the style, ignore if it doesn't exist in the letterhead
+        try:
+            table.style = 'Table Grid'
+        except KeyError:
+            pass
+            
         hdr_cells = table.rows[0].cells
         headers_docx = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Reg Date', 'Goods']
         for i, h in enumerate(headers_docx):
@@ -274,7 +279,7 @@ def run():
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        # Output PDF Bytes
+        # Output FPDF Base Bytes
         proper_filename = f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf"
         proper_filepath = os.path.join(tempfile.gettempdir(), proper_filename)
         pdf.output(proper_filepath)
