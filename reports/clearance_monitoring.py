@@ -17,27 +17,6 @@ OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# Stop words and generic descriptors to exclude from database query parameters
-STOP_WORDS = {"THE", "AND", "OF", "A", "AN", "FOR", "TO", "IN", "ON", "AT", "BY", "WITH", "OR", "DE", "LA"}
-GENERIC_TERMS = {"IPA", "BEER", "WINE", "CIDER", "ALE", "STOUT", "LAGER", "SPIRITS", "SELTZER", "SODA", "WATER"}
-
-def extract_core_search_words(raw_mark):
-    """Strips noise words and generic descriptors to create clean database tokens."""
-    words = re.findall(r'\b\w+\b', raw_mark.upper())
-    
-    # 1. Primary Filter: Strip out stop words and generic industry descriptors
-    core = [w for w in words if w not in STOP_WORDS and w not in GENERIC_TERMS]
-    
-    # 2. Fallback: If generic filtering removed everything (e.g., mark is "CRAFT BEER"), keep stop-words filtered only
-    if not core:
-        core = [w for w in words if w not in STOP_WORDS]
-        
-    # 3. Ultimate Fallback: If all words were stop words (e.g., mark is "THE OF"), keep original words
-    if not core:
-        core = words
-        
-    return core
-
 def get_dynamic_names(timeframe, raw_mark):
     today = datetime.date.today()
     current_year = today.year
@@ -135,10 +114,6 @@ def run():
         squished_mark = raw_mark.replace(" ", "")
         today = datetime.datetime.now()
 
-        # Extract clean core search words for databases
-        core_words = extract_core_search_words(raw_mark)
-        core_squished = "".join(core_words)
-
         # Date & Query calculations
         use_all_time = (report_type == "Clearance")
         try:
@@ -164,46 +139,32 @@ def run():
         ttb_date_from = ttb_start_date.strftime("%m/%d/%Y")
         uspto_date_from = ttb_start_date.strftime("%Y%m%d")
 
-        # Build Web Queries (Searches full raw mark + cleaned phrase)
-        clean_phrase = " ".join(core_words)
-        if raw_mark.strip().upper() != clean_phrase:
-            web_mark_base = f'("{raw_mark}" OR "{clean_phrase}")'
-        else:
-            web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
+        # --- Reverted to your exact original working queries! ---
+        words = raw_mark.split()
+        web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
+        uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
+        uspto_mark = f"({uspto_spaced}) OR (CM2:{squished_mark}*)" if raw_mark != squished_mark else uspto_spaced
+        ttb_marks_list = ["%" + "%".join(words) + "%"]
 
-        # Build Primary USPTO Query (Core terms)
-        uspto_spaced = " AND ".join([f"CM2:{w}*" for w in core_words])
-        uspto_mark = f"({uspto_spaced}) OR (CM2:{core_squished}*)"
-        
-        # Build Primary TTB Query List
-        ttb_marks_list = [raw_mark.replace(" IPA", "").replace(" BEER", "").replace(" WINE", "").strip()]
-        if clean_phrase and clean_phrase not in ttb_marks_list:
-            ttb_marks_list.append(clean_phrase)
-
-        # Build Expansion Terms with Full Wildcards (*TERM* for USPTO and %TERM% for TTB)
         secondary_terms = []
         if dominant_term:
             web_mark_base += f' OR "{dominant_term}"'
-            secondary_terms.append(f"(CM2:*{dominant_term}*)")
+            secondary_terms.append(f"(CM2:*{dominant_term}*)") # Added double asterisks as requested
             ttb_marks_list.append(f"%{dominant_term}%")
-            
         if phonetic_term:
             web_mark_base += f' OR "{phonetic_term}"'
             secondary_terms.append(f"(CM2:*{phonetic_term}*)")
             ttb_marks_list.append(f"%{phonetic_term}%")
-            
         if conceptual_term:
             web_mark_base += f' OR "{conceptual_term}"'
             secondary_terms.append(f"(CM2:*{conceptual_term}*)")
             ttb_marks_list.append(f"%{conceptual_term}%")
-            
         if substring_term:
             web_mark_base += f' OR "{substring_term}"'
             secondary_terms.append(f"(CM2:*{substring_term}*)")
             ttb_marks_list.append(f"%{substring_term}%")
 
-        # Modern Cloud USPTO Class Filter Syntax
-        class_filter = ' AND (IC:030 OR IC:032 OR IC:033 OR IC:043)'
+        class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
         date_filter = "" if use_all_time else f" AND FD:[{uspto_date_from} TO {uspto_date_to}]"
 
         primary_uspto_query = f"({uspto_mark}){class_filter}{date_filter}"
@@ -216,7 +177,7 @@ def run():
         with st.spinner("Scraping USPTO, TTB, and Google... This may take 1-2 minutes."):
             try:
                 with sync_playwright() as p:
-                    # --- The Golden Cloud Server Flags ---
+                    # Single-process flags to prevent server RAM crashes
                     cloud_args = [
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
@@ -236,12 +197,9 @@ def run():
                     )
                     page = context.new_page()
                     
-                    # THE MEMORY DIET: Block heavy images, media, and fonts
-                    page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
-                    
+                    # (Removed page.route Font/Image blockers that were breaking the USPTO UI)
                     uspto_data = scrape_uspto(page, primary_uspto_query, excel_filename, secondary_uspto_query)
                     
-                    # Aggressive Cleanup
                     context.close()
                     browser.close() 
                     gc.collect()
@@ -254,12 +212,8 @@ def run():
                     )
                     page = context.new_page()
                     
-                    # THE MEMORY DIET: Block heavy images, media, and fonts
-                    page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
-                    
                     ttb_data = scrape_ttb(page, ttb_date_from, ttb_date_to, list(set(ttb_marks_list)))
                     
-                    # Aggressive Cleanup
                     context.close()
                     browser.close() 
                     gc.collect()
@@ -294,7 +248,6 @@ def run():
 
                 st.success("Search & Report Generation Complete!")
 
-                # Provide Download Buttons
                 with open(pdf_filename, "rb") as f:
                     st.download_button("Download PDF Report", f, file_name=f"{base_filename}.pdf", mime="application/pdf")
                 with open(docx_filename, "rb") as f:
