@@ -80,13 +80,6 @@ def run():
 
     raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
 
-    # Real-time Section 2(e) Risk Analysis
-    if raw_mark.strip():
-        raw_risk_data, feedback_summary = analyzer.analyze_mark(raw_mark, "Monitoring")
-        with st.expander("⚠️ Section 2(e) Analysis & Risk Feedback", expanded=True):
-            for statement in feedback_summary:
-                st.warning(f"- {statement}")
-
     col1, col2 = st.columns(2)
     with col1:
         client_name = st.text_input("Client Name:")
