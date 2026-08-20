@@ -3,6 +3,7 @@ import pandas as pd
 import tempfile
 import os
 import requests
+import subprocess
 from fpdf import FPDF
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -38,16 +39,11 @@ def run():
     col1, col2 = st.columns(2)
     with col1:
         owner_name = st.text_input("Exact Owner / Applicant Name", placeholder="e.g. ABC Brewing Co.")
+        exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
-        # Adds some invisible spacing so the checkbox aligns nicely with the other column
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         use_letterhead = st.checkbox("📄 Export Reports on LBL Letterhead", value=False)
-        
-    exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
-
-    # Clean, dedicated checkbox placement right above the action button
-    use_letterhead = st.checkbox("📄 Export Word Doc on Firm Letterhead", value=False)
 
     if 'status_report_data' not in st.session_state:
         st.session_state['status_report_data'] = None
@@ -139,9 +135,6 @@ def run():
         # --- 2. PREPARE PDF SETUP ---
         class PDF(FPDF):
             def header(self):
-                if use_letterhead and os.path.exists("logo.jpg"):
-                    self.image("logo.jpg", 10, 8, 30)
-                
                 self.set_x(45) 
                 self.set_font('Arial', 'B', 15)
                 self.set_text_color(47, 84, 150)
@@ -278,7 +271,7 @@ def run():
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        # Output PDF Bytes
+        # Output FPDF Base Bytes
         proper_filename = f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf"
         proper_filepath = os.path.join(tempfile.gettempdir(), proper_filename)
         pdf.output(proper_filepath)
@@ -291,6 +284,22 @@ def run():
         doc.save(proper_filepath_docx)
         with open(proper_filepath_docx, "rb") as f:
             docx_bytes = f.read()
+
+        # CONVERT DOCX TO PDF IF LETTERHEAD IS USED
+        if use_letterhead:
+            with st.spinner("Converting LBL Letterhead to PDF format..."):
+                try:
+                    subprocess.run([
+                        "libreoffice", "--headless", "--convert-to", "pdf", 
+                        proper_filepath_docx, "--outdir", tempfile.gettempdir()
+                    ], check=True, capture_output=True)
+                    
+                    if os.path.exists(proper_filepath):
+                        with open(proper_filepath, "rb") as f:
+                            pdf_bytes = f.read()  # Overwrites the basic FPDF with the Letterhead PDF!
+                except Exception as e:
+                    st.warning("Could not convert Letterhead to PDF. Falling back to standard PDF.")
+                    print(f"LibreOffice Error: {e}")
 
         # Save to state
         st.session_state['status_report_data'] = {
@@ -364,7 +373,7 @@ def run():
                     with open(data['proper_filepath'], "wb") as f:
                         f.write(data['pdf_bytes'])
                     with open(data['proper_filepath_docx'], "wb") as f:
-                        f.write(data['proper_filepath_docx'])
+                        f.write(data['docx_bytes'])
                         
                     pdf_link = upload_to_drive(data['proper_filepath'])
                     docx_link = upload_to_drive(data['proper_filepath_docx'])
