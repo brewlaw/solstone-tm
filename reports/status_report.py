@@ -92,36 +92,34 @@ def run():
 
         st.success(f"Found {len(report_df)} mark(s)!")
         
-        # --- WEB APP DISPLAY DATAFRAME ---
-        display_df = report_df.copy()
-        
-        # Extract live TSDR image URL and replace bracket text with "Design Mark"
-        display_df['Design'] = display_df.apply(
-            lambda x: f"https://tsdr.uspto.gov/img/{x['S/N']}/large" if str(x['Mark']).startswith("[Image for ") else None, 
-            axis=1
-        )
-        display_df['Mark'] = display_df['Mark'].apply(lambda x: "Design Mark" if str(x).startswith("[Image for ") else x)
-        
-        # Reorder columns to put Design first
-        display_cols = ['Design', 'Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Registration Date', 'Goods & Services']
-        display_df = display_df[display_cols]
-
-        st.dataframe(
-            display_df, 
-            width="stretch",
-            column_config={
-                "Design": st.column_config.ImageColumn("Design")
-            }
-        )
-
-        # --- HTML DATAFRAME ---
+        # --- PREPARE DATA WITH EMBEDDED IMAGE TAGS ---
         html_df = report_df.copy()
         html_df['Mark'] = html_df.apply(
-            lambda x: f'<img src="https://tsdr.uspto.gov/img/{x["S/N"]}/large" width="100">' if str(x['Mark']).startswith("[Image for ") else x['Mark'],
+            lambda x: f'<img src="https://tsdr.uspto.gov/img/{x["S/N"]}/large">' if str(x['Mark']).startswith("[Image for ") else x['Mark'],
             axis=1
         )
-        html_table = html_df.to_html(index=False, escape=False)
         
+        # Generate the raw HTML table string
+        raw_html_table = html_df.to_html(index=False, escape=False)
+        
+        # --- WEB APP DISPLAY DATAFRAME ---
+        st.markdown(
+            f"""
+            <style>
+                .custom-table {{ border-collapse: collapse; width: 100%; font-size: 14px; margin-bottom: 20px; font-family: sans-serif; }}
+                .custom-table th, .custom-table td {{ border: 1px solid #e0e0e0; padding: 12px; text-align: left; vertical-align: middle; }}
+                .custom-table th {{ background-color: #f7f7f9; font-weight: 600; color: #31333F; border-bottom: 2px solid #e0e0e0; }}
+                .custom-table tr:nth-child(even) {{ background-color: #fbfbfb; }}
+                .custom-table img {{ max-height: 70px; max-width: 100px; object-fit: contain; }}
+            </style>
+            <div style="overflow-x: auto; border-radius: 8px; border: 1px solid #e0e0e0;">
+                {raw_html_table.replace('<table border="1" class="dataframe">', '<table class="custom-table">')}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # --- HTML DATAFRAME (FOR DOWNLOAD) ---
         html_report = f"""
         <html>
         <head>
@@ -129,9 +127,10 @@ def run():
                 body {{ font-family: Arial, sans-serif; margin: 30px; }}
                 h1 {{ color: #2F5496; }}
                 table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
-                th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; font-size: 13px; }}
-                th {{ background-color: #f2f2f2; color: #333; }}
+                th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; font-size: 13px; vertical-align: middle; }}
+                th {{ background-color: #f2f2f2; color: #333; border-bottom: 2px solid #ddd; }}
                 tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                img {{ max-height: 80px; max-width: 120px; object-fit: contain; }}
             </style>
         </head>
         <body>
@@ -140,11 +139,12 @@ def run():
             <p><strong>Class Filter:</strong> {ic_classes if ic_classes else 'All Live Classes'}</p>
             <p><strong>Date Generated:</strong> {datetime.now().strftime('%B %d, %Y')}</p>
             <hr>
-            {html_table}
+            {raw_html_table.replace('<table border="1" class="dataframe">', '<table>')}
         </body>
         </html>
         """
         
+        # 2. Generate PDF
         class PDF(FPDF):
             def header(self):
                 if os.path.exists("logo.jpg"):
@@ -265,7 +265,7 @@ def run():
                 data=html_report,
                 file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.html",
                 mime="text/html",
-                width="stretch"
+                use_container_width=True
             )
             
         with dl_col2:
@@ -274,5 +274,5 @@ def run():
                 data=pdf_bytes,
                 file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf",
                 mime="application/pdf",
-                width="stretch"
+                use_container_width=True
             )
