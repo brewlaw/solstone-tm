@@ -4,6 +4,12 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_BREAK
 
+# Initialize doc at the start of the function
+try:
+    doc = Document("letterhead_template.docx")
+except Exception:
+    doc = Document() # Fallback to a blank document if template is missing
+    
 def generate_docx_2(client_name, attention_name, email, report_date, raw_mark, report_title, page_data, output_filename, feedback_summary):
     print("\nDrafting DOCX Legal Opinion Template (v2.0)...")
     
