@@ -165,14 +165,18 @@ def run():
         pdf.set_font('Arial', '', 7)
         line_height = 4
         
+        import requests
+        
         for _, row in report_df.iterrows():
             def clean(val):
-                # Clean unsupported characters
                 return str(val).replace('“', '"').replace('”', '"').replace("’", "'").encode('latin-1', 'replace').decode('latin-1')
             
+            raw_mark = clean(row['Mark'])
+            serial_num = clean(row['S/N'])
+            
             texts = [
-                clean(row['Mark']),
-                clean(row['S/N']),
+                raw_mark,
+                serial_num,
                 clean(row['R/N']),
                 clean(row['Status']),
                 clean(row['Next Deadline']),
@@ -180,16 +184,36 @@ def run():
                 clean(row['Goods & Services'])
             ]
             
-            # Calculate row height based on text wrapping
+            # --- Detect Design Mark and Calculate Row Height ---
+            is_design_mark = False
+            img_path = None
+            if raw_mark.startswith("[Image for "):
+                is_design_mark = True
+                # Fetch image from TSDR
+                try:
+                    tsdr_url = f"https://tsdr.uspto.gov/img/{serial_num}/large"
+                    headers_dict = {"User-Agent": "Mozilla/5.0"}
+                    response = requests.get(tsdr_url, headers=headers_dict, timeout=5)
+                    if response.status_code == 200:
+                        img_path = f"temp_img_{serial_num}.png"
+                        with open(img_path, "wb") as f:
+                            f.write(response.content)
+                except Exception:
+                    pass
+            
+            # Calculate text row height
             max_lines = 1
             for i, text in enumerate(texts):
                 text_width = pdf.get_string_width(text)
-                # Calculate how many lines this specific text will take up
                 lines = max(1, int((text_width * 1.05) / (col_widths[i] - 2)) + 1)
                 if lines > max_lines:
                     max_lines = lines
                     
             row_height = max_lines * line_height
+            
+            # Force row height to fit the image if it's a design mark
+            if is_design_mark and img_path:
+                row_height = max(row_height, 20) # Ensure at least 20mm height for the image
             
             # Check if we need a page break before drawing the row
             if pdf.get_y() + row_height > 275:
@@ -200,26 +224,31 @@ def run():
             
             # Draw cells
             for i, text in enumerate(texts):
-                # 1. Draw the border rectangle
                 pdf.rect(x_start, y_start, col_widths[i], row_height)
-                
-                # 2. Position cursor inside the rectangle with 1mm padding
                 pdf.set_xy(x_start + 1, y_start + 1)
                 
-                # 3. Print the wrapping text without drawing new borders
-                align = 'L' if i in [0, 4, 6] else 'C' # Left align Mark, Deadline, Goods
-                pdf.multi_cell(col_widths[i] - 2, line_height - 0.5, text, border=0, align=align)
+                # --- Embed Image in the first column ---
+                if i == 0 and is_design_mark and img_path:
+                    try:
+                        # Center a 15x15mm image within the column bounds
+                        img_x = x_start + (col_widths[i] - 15) / 2
+                        img_y = y_start + (row_height - 15) / 2
+                        pdf.image(img_path, x=img_x, y=img_y, w=15, h=15)
+                    except Exception:
+                        pdf.multi_cell(col_widths[i] - 2, line_height - 0.5, text, border=0, align='C')
+                else:
+                    align = 'L' if i in [0, 4, 6] else 'C'
+                    # Print normal text
+                    if not (i == 0 and is_design_mark): 
+                        pdf.multi_cell(col_widths[i] - 2, line_height - 0.5, text, border=0, align=align)
                 
                 x_start += col_widths[i]
             
-            # Reset cursor to the next line
             pdf.set_xy(10, y_start + row_height)
             
-        # Save PDF to temporary memory
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            pdf.output(tmp.name)
-            with open(tmp.name, "rb") as f:
-                pdf_bytes = f.read()
+            # Clean up temporary image
+            if img_path and os.path.exists(img_path):
+                os.remove(img_path)
 
         # 3. Display Side-by-Side Download Buttons
         dl_col1, dl_col2 = st.columns(2)
