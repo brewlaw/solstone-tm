@@ -96,7 +96,16 @@ def run():
                     ]
 
                     # --- 1. Run USPTO Search ---
-                    browser = p.chromium.launch(headless=True, args=cloud_args)
+                    browser = p.chromium.launch(
+    headless=True,
+    args=[
+        '--no-sandbox', 
+        '--disable-dev-shm-usage', 
+        '--disable-gpu', 
+        '--single-process',
+        '--js-flags="--max-old-space-size=256"'
+    ]
+)
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         accept_downloads=True,

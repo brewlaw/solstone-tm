@@ -103,7 +103,7 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                 print(f"    TTB Scraper error: {e}")
                 if attempt < 2:
                     print("    🚨 TTB Server glitched. Waiting 5 seconds and refreshing...")
-                    page.wait_for_timeout(5000)
+                    time.sleep(5)  # <-- Safe fallback that doesn't rely on the browser
                 else:
                     print(f"    🚨 TTB Scraper failed for '{mark}' after 3 attempts.")
                     
