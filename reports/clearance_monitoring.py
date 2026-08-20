@@ -17,6 +17,27 @@ OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+# Stop words and generic descriptors to exclude from database query parameters
+STOP_WORDS = {"THE", "AND", "OF", "A", "AN", "FOR", "TO", "IN", "ON", "AT", "BY", "WITH", "OR", "DE", "LA"}
+GENERIC_TERMS = {"IPA", "BEER", "WINE", "CIDER", "ALE", "STOUT", "LAGER", "SPIRITS", "SELTZER", "SODA", "WATER"}
+
+def extract_core_search_words(raw_mark):
+    """Strips noise words and generic descriptors to create clean database tokens."""
+    words = re.findall(r'\b\w+\b', raw_mark.upper())
+    
+    # 1. Primary Filter: Strip out stop words and generic industry descriptors
+    core = [w for w in words if w not in STOP_WORDS and w not in GENERIC_TERMS]
+    
+    # 2. Fallback: If generic filtering removed everything (e.g., mark is "CRAFT BEER"), keep stop-words filtered only
+    if not core:
+        core = [w for w in words if w not in STOP_WORDS]
+        
+    # 3. Ultimate Fallback: If all words were stop words (e.g., mark is "THE OF"), keep original words
+    if not core:
+        core = words
+        
+    return core
+
 def get_dynamic_names(timeframe, raw_mark):
     today = datetime.date.today()
     current_year = today.year
@@ -114,6 +135,10 @@ def run():
         squished_mark = raw_mark.replace(" ", "")
         today = datetime.datetime.now()
 
+        # Extract clean core search words for databases
+        core_words = extract_core_search_words(raw_mark)
+        core_squished = "".join(core_words)
+
         # Date & Query calculations
         use_all_time = (report_type == "Clearance")
         try:
@@ -139,12 +164,19 @@ def run():
         ttb_date_from = ttb_start_date.strftime("%m/%d/%Y")
         uspto_date_from = ttb_start_date.strftime("%Y%m%d")
 
-        # Build Queries
-        words = raw_mark.split()
-        web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
-        uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
-        uspto_mark = f"({uspto_spaced}) OR (CM2:{squished_mark}*)" if raw_mark != squished_mark else uspto_spaced
-        ttb_marks_list = ["%" + "%".join(words) + "%"]
+        # Build Web Queries (Searches full raw mark + cleaned phrase)
+        clean_phrase = " ".join(core_words)
+        if raw_mark.strip().upper() != clean_phrase:
+            web_mark_base = f'("{raw_mark}" OR "{clean_phrase}")'
+        else:
+            web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
+
+        # Build USPTO Queries (Uses cleaned core tokens)
+        uspto_spaced = " AND ".join([f"CM2:{w}*" for w in core_words])
+        uspto_mark = f"({uspto_spaced}) OR (CM2:{core_squished}*)"
+        
+        # Build TTB Queries (Uses cleaned core tokens)
+        ttb_marks_list = ["%" + "%".join(core_words) + "%"]
 
         secondary_terms = []
         if dominant_term:
@@ -205,7 +237,7 @@ def run():
                     # Aggressive Cleanup
                     context.close()
                     browser.close() 
-                    gc.collect() # Force Python to flush the RAM
+                    gc.collect()
 
                     # --- 2. Run TTB Search ---
                     browser = p.chromium.launch(headless=True, args=cloud_args)
@@ -225,7 +257,7 @@ def run():
                     browser.close() 
                     gc.collect()
 
-                # --- 3. Run Google Search (Does not use Playwright) ---
+                # --- 3. Run Google Search ---
                 google_data = scrape_google(web_mark_base, raw_mark, google_date_from, google_date_to)
 
                 # Report Generation
@@ -241,7 +273,6 @@ def run():
 
                 page_data = generate_pdf(raw_mark, squished_mark, ttb_date_from, ttb_date_to, uspto_data, ttb_data, google_data, pdf_filename, report_title)
                 
-                # Generate Word Doc using explicit keyword arguments
                 generate_docx_2(
                     client_name=client_name,
                     attention_name=attention_name,
