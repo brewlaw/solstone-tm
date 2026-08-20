@@ -59,7 +59,7 @@ def generate_docx_2(client_name, attention_name, email, report_date, raw_mark, r
     # Loop through the RAG feedback and create bullet points
     if feedback_summary:
         for statement in feedback_summary:
-            document.add_paragraph(statement, style='List Bullet')
+            doc.add_paragraph(f"• {statement}")
     else:
         document.add_paragraph("No immediate Section 2(e) issues detected in dictionaries.")
 
