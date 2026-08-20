@@ -24,11 +24,9 @@ def run():
 
     col1, col2 = st.columns(2)
     with col1:
-        client_name = st.text_input("Client Name:")
-        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):")
-        use_letterhead = st.checkbox("📄 Export Word Doc on Firm Letterhead", value=False)
-    with col2:
-        client_email = st.text_input("Client Email(s):")
+        client_name = st.text_input("Client Name:", value=def_client)
+        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):", value=def_attn)
+        use_letterhead = st.checkbox("📄 Export Word Doc on LBL Letterhead", value=False)
 
     raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
 

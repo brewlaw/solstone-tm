@@ -114,7 +114,7 @@ def run():
     with col1:
         client_name = st.text_input("Client Name:", value=def_client)
         attention_name = st.text_input("Attention Name (e.g. Adeline Druart):", value=def_attn)
-        use_letterhead = st.checkbox("📄 Export Word Doc on Firm Letterhead", value=False)
+        use_letterhead = st.checkbox("📄 Export Word Doc on LBL Letterhead", value=False)
     with col2:
         client_email = st.text_input("Client Email(s):", value=def_email)
         lookback_years = st.number_input("Lookback Years:", min_value=0.1, max_value=5.0, value=def_lookback, step=0.25)

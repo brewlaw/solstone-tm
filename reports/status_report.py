@@ -40,7 +40,10 @@ def run():
         owner_name = st.text_input("Exact Owner / Applicant Name", placeholder="e.g. ABC Brewing Co.")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
-
+        # Adds some invisible spacing so the checkbox aligns nicely with the other column
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        use_letterhead = st.checkbox("📄 Export Reports on LBL Letterhead", value=False)
+        
     exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
 
     # Clean, dedicated checkbox placement right above the action button
