@@ -91,9 +91,37 @@ def run():
         report_df.columns = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Registration Date', 'Goods & Services']
 
         st.success(f"Found {len(report_df)} mark(s)!")
-        st.dataframe(report_df, width="stretch")
+        
+        # --- WEB APP DISPLAY DATAFRAME ---
+        display_df = report_df.copy()
+        
+        # Extract live TSDR image URL and replace bracket text with "Design Mark"
+        display_df['Design'] = display_df.apply(
+            lambda x: f"https://tsdr.uspto.gov/img/{x['S/N']}/large" if str(x['Mark']).startswith("[Image for ") else None, 
+            axis=1
+        )
+        display_df['Mark'] = display_df['Mark'].apply(lambda x: "Design Mark" if str(x).startswith("[Image for ") else x)
+        
+        # Reorder columns to put Design first
+        display_cols = ['Design', 'Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Registration Date', 'Goods & Services']
+        display_df = display_df[display_cols]
 
-        html_table = report_df.to_html(index=False, escape=False)
+        st.dataframe(
+            display_df, 
+            width="stretch",
+            column_config={
+                "Design": st.column_config.ImageColumn("Design")
+            }
+        )
+
+        # --- HTML DATAFRAME ---
+        html_df = report_df.copy()
+        html_df['Mark'] = html_df.apply(
+            lambda x: f'<img src="https://tsdr.uspto.gov/img/{x["S/N"]}/large" width="100">' if str(x['Mark']).startswith("[Image for ") else x['Mark'],
+            axis=1
+        )
+        html_table = html_df.to_html(index=False, escape=False)
+        
         html_report = f"""
         <html>
         <head>
