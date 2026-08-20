@@ -103,18 +103,19 @@ def run():
         raw_html_table = html_df.to_html(index=False, escape=False)
         
         # --- WEB APP DISPLAY DATAFRAME ---
+        # The HTML block MUST NOT be indented, or Streamlit will treat it as a code block.
         st.markdown(
             f"""
-            <style>
-                .custom-table {{ border-collapse: collapse; width: 100%; font-size: 14px; margin-bottom: 20px; font-family: sans-serif; }}
-                .custom-table th, .custom-table td {{ border: 1px solid #e0e0e0; padding: 12px; text-align: left; vertical-align: middle; }}
-                .custom-table th {{ background-color: #f7f7f9; font-weight: 600; color: #31333F; border-bottom: 2px solid #e0e0e0; }}
-                .custom-table tr:nth-child(even) {{ background-color: #fbfbfb; }}
-                .custom-table img {{ max-height: 70px; max-width: 100px; object-fit: contain; }}
-            </style>
-            <div style="overflow-x: auto; border-radius: 8px; border: 1px solid #e0e0e0;">
-                {raw_html_table.replace('<table border="1" class="dataframe">', '<table class="custom-table">')}
-            </div>
+<style>
+    .custom-table {{ border-collapse: collapse; width: 100%; font-size: 14px; margin-bottom: 20px; font-family: sans-serif; }}
+    .custom-table th, .custom-table td {{ border: 1px solid #e0e0e0; padding: 12px; text-align: left; vertical-align: middle; }}
+    .custom-table th {{ background-color: #f7f7f9; font-weight: 600; color: #31333F; border-bottom: 2px solid #e0e0e0; }}
+    .custom-table tr:nth-child(even) {{ background-color: #fbfbfb; }}
+    .custom-table img {{ max-height: 70px; max-width: 100px; object-fit: contain; }}
+</style>
+<div style="overflow-x: auto; border-radius: 8px; border: 1px solid #e0e0e0;">
+    {raw_html_table.replace('<table border="1" class="dataframe">', '<table class="custom-table">')}
+</div>
             """,
             unsafe_allow_html=True
         )
