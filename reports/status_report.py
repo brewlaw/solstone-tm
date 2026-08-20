@@ -3,7 +3,6 @@ import pandas as pd
 import tempfile
 import os
 import requests
-import subprocess
 from fpdf import FPDF
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -42,6 +41,7 @@ def run():
         exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
     with col2:
         ic_classes = st.text_input("International Classes (optional, comma-separated)", placeholder="e.g. 032, 033")
+        # Adds some invisible spacing so the checkbox aligns nicely with the other column
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         use_letterhead = st.checkbox("📄 Export Reports on LBL Letterhead", value=False)
 
@@ -132,9 +132,12 @@ def run():
         </html>
         """
         
-        # --- 2. PREPARE PDF SETUP ---
+        # --- 2. PREPARE PDF SETUP (Standard FPDF) ---
         class PDF(FPDF):
             def header(self):
+                if use_letterhead and os.path.exists("logo.jpg"):
+                    self.image("logo.jpg", 10, 8, 30)
+                
                 self.set_x(45) 
                 self.set_font('Arial', 'B', 15)
                 self.set_text_color(47, 84, 150)
@@ -271,7 +274,7 @@ def run():
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        # Output FPDF Base Bytes
+        # Output PDF Bytes
         proper_filename = f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf"
         proper_filepath = os.path.join(tempfile.gettempdir(), proper_filename)
         pdf.output(proper_filepath)
@@ -284,22 +287,6 @@ def run():
         doc.save(proper_filepath_docx)
         with open(proper_filepath_docx, "rb") as f:
             docx_bytes = f.read()
-
-        # CONVERT DOCX TO PDF IF LETTERHEAD IS USED
-        if use_letterhead:
-            with st.spinner("Converting LBL Letterhead to PDF format..."):
-                try:
-                    subprocess.run([
-                        "libreoffice", "--headless", "--convert-to", "pdf", 
-                        proper_filepath_docx, "--outdir", tempfile.gettempdir()
-                    ], check=True, capture_output=True)
-                    
-                    if os.path.exists(proper_filepath):
-                        with open(proper_filepath, "rb") as f:
-                            pdf_bytes = f.read()  # Overwrites the basic FPDF with the Letterhead PDF!
-                except Exception as e:
-                    st.warning("Could not convert Letterhead to PDF. Falling back to standard PDF.")
-                    print(f"LibreOffice Error: {e}")
 
         # Save to state
         st.session_state['status_report_data'] = {
