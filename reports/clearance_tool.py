@@ -10,6 +10,7 @@ from scrapers.ttb_scraper import scrape_ttb
 from scrapers.google_scraper import scrape_google
 from reports.pdf_generator import generate_pdf
 from reports.docx_generator_2 import generate_docx_2 
+from utils.saved_searches import get_saved_searches, save_search_config, delete_saved_search
 
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
@@ -22,24 +23,82 @@ def run():
     if 'clearance_report_data' not in st.session_state:
         st.session_state['clearance_report_data'] = None
 
+    # --- SAVED SEARCHES SELECTION ---
+    saved_profiles = get_saved_searches()
+    
+    # Check if coming from Saved Searches Manager redirect
+    active_profile_key = st.session_state.get('load_profile_key', "-- Select a Saved Search --")
+    if active_profile_key not in ["-- Select a Saved Search --"] + list(saved_profiles.keys()):
+        active_profile_key = "-- Select a Saved Search --"
+
+    col_profile, col_profile_info = st.columns([3, 2])
+    with col_profile:
+        selected_profile = st.selectbox(
+            "📂 Load Saved Quarterly Search Profile:",
+            ["-- Select a Saved Search --"] + list(saved_profiles.keys()),
+            index=(["-- Select a Saved Search --"] + list(saved_profiles.keys())).index(active_profile_key)
+        )
+    
+    # Clear redirect key after loading
+    if 'load_profile_key' in st.session_state:
+        del st.session_state['load_profile_key']
+
+    p_data = saved_profiles.get(selected_profile, {})
+    with col_profile_info:
+        if selected_profile != "-- Select a Saved Search --":
+            st.info(f"🕒 **Last Ran:** {p_data.get('last_run', 'Never')}")
+
+    # Set default values based on loaded profile
+    def_client = p_data.get('client_name', '')
+    def_attn = p_data.get('attention_name', '')
+    def_email = p_data.get('client_email', '')
+    def_mark = p_data.get('raw_mark', '')
+    def_dom = p_data.get('dominant_term', '')
+    def_phon = p_data.get('phonetic_term', '')
+    def_conc = p_data.get('conceptual_term', '')
+    def_sub = p_data.get('substring_term', '')
+
     col1, col2 = st.columns(2)
     with col1:
-        client_name = st.text_input("Client Name:")
-        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):")
+        client_name = st.text_input("Client Name:", value=def_client)
+        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):", value=def_attn)
     with col2:
-        client_email = st.text_input("Client Email(s):")
+        client_email = st.text_input("Client Email(s):", value=def_email)
 
-    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
+    raw_mark = st.text_input("Full Trademark Name:", value=def_mark, placeholder="e.g. SUN SHINE")
 
     st.subheader("Search Term Expansions")
     st.caption("Expand your search to catch variations, sound-alikes, meaning-alikes, and substrings.")
     col_a, col_b = st.columns(2)
     with col_a:
-        dominant_term = st.text_input("Dominant/Core Word (optional):").upper()
-        phonetic_term = st.text_input("Phonetic Equivalent (optional):").upper()
+        dominant_term = st.text_input("Dominant/Core Word (optional):", value=def_dom).upper()
+        phonetic_term = st.text_input("Phonetic Equivalent (optional):", value=def_phon).upper()
     with col_b:
-        conceptual_term = st.text_input("Conceptual Equivalent (optional):").upper()
-        substring_term = st.text_input("Root Substring / Pun (optional):").upper()
+        conceptual_term = st.text_input("Conceptual Equivalent (optional):", value=def_conc).upper()
+        substring_term = st.text_input("Root Substring / Pun (optional):", value=def_sub).upper()
+
+    # --- SAVE PROFILE FORM EXPANDER ---
+    with st.expander("💾 Save / Update Search Profile for Quarterly Re-Runs", expanded=False):
+        save_name_default = selected_profile if selected_profile != "-- Select a Saved Search --" else (f"{client_name} - {raw_mark}" if client_name and raw_mark else "")
+        save_profile_name = st.text_input("Search Profile Label:", value=save_name_default, placeholder="e.g. Ocelot Brewing - Sip of Sunshine")
+        if st.button("💾 Save Search Configuration"):
+            if not save_profile_name.strip():
+                st.error("Please enter a profile label.")
+            else:
+                params = {
+                    'raw_mark': raw_mark,
+                    'client_name': client_name,
+                    'attention_name': attention_name,
+                    'client_email': client_email,
+                    'dominant_term': dominant_term,
+                    'phonetic_term': phonetic_term,
+                    'conceptual_term': conceptual_term,
+                    'substring_term': substring_term,
+                    'last_run': p_data.get('last_run', 'Not run yet')
+                }
+                save_search_config(save_profile_name.strip(), params)
+                st.success(f"Search profile '{save_profile_name.strip()}' saved!")
+                st.rerun()
 
     if st.button("Run Full Clearance Search", type="primary"):
         if not raw_mark.strip():
@@ -110,12 +169,6 @@ def run():
                     gc.collect()
 
                     # --- 2. Run TTB Search (IN CHUNKS) ---
-                    browser = p.chromium.launch(headless=True, args=cloud_args)
-                    context = browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        accept_downloads=True
-                    )
-                    
                     ttb_chunks = [
                         ("01/01/1985", "12/31/1999"),
                         ("01/01/2000", "12/31/2014"),
@@ -124,15 +177,23 @@ def run():
                     
                     raw_ttb_data = []
                     for start_date, end_date in ttb_chunks:
+                        # FIX: Launch a brand new browser for EVERY chunk to prevent memory crashes!
+                        browser = p.chromium.launch(headless=True, args=cloud_args)
+                        context = browser.new_context(
+                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            accept_downloads=True
+                        )
                         chunk_page = context.new_page()
+                        
                         chunk_results = scrape_ttb(chunk_page, start_date, end_date, list(set(ttb_marks_list)))
                         if chunk_results:
                             raw_ttb_data.extend(chunk_results)
+                        
+                        # Close this browser entirely before looping to the next chunk
                         chunk_page.close()
-                    
-                    context.close()
-                    browser.close() 
-                    gc.collect()
+                        context.close()
+                        browser.close() 
+                        gc.collect()
                     
                     unique_ttb = {item['ttb_id']: item for item in raw_ttb_data}
                     ttb_data = list(unique_ttb.values())
@@ -167,6 +228,11 @@ def run():
                     pdf_bytes = f.read()
                 with open(docx_filename, "rb") as f:
                     docx_bytes = f.read()
+
+                # Automatically update 'last_run' timestamp if profile is active
+                if selected_profile != "-- Select a Saved Search --":
+                    p_data['last_run'] = today.strftime("%B %d, %Y")
+                    save_search_config(selected_profile, p_data)
 
                 st.session_state['clearance_report_data'] = {
                     'base_filename': base_filename,
