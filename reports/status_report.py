@@ -253,10 +253,19 @@ def run():
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            pdf.output(tmp.name)
-            with open(tmp.name, "rb") as f:
-                pdf_bytes = f.read()
+        # Output the PDF with its correct filename so it uploads to Drive with the right name
+        proper_filename = f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf"
+        proper_filepath = os.path.join(tempfile.gettempdir(), proper_filename)
+        pdf.output(proper_filepath)
+        
+        with open(proper_filepath, "rb") as f:
+            pdf_bytes = f.read()
+
+        # --- GOOGLE DRIVE UPLOAD ---
+        from utils.drive_uploader import upload_to_drive
+        pdf_drive_link = upload_to_drive(proper_filepath)
+        if pdf_drive_link:
+            st.info("☁️ Status Report permanently archived to Google Drive!")
 
         dl_col1, dl_col2 = st.columns(2)
         
@@ -273,7 +282,7 @@ def run():
             st.download_button(
                 label="📥 Download PDF Report",
                 data=pdf_bytes,
-                file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf",
+                file_name=proper_filename,
                 mime="application/pdf",
                 use_container_width=True
             )

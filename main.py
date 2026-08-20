@@ -24,6 +24,26 @@ tool = st.sidebar.radio(
     ]
 )
 
+def show_drive_archive():
+    st.header("Solstone Cloud Report Archive")
+    st.write("Access all historically generated clearance, status, and monitoring reports stored on Google Drive.")
+    
+    from utils.drive_uploader import list_drive_reports
+    files = list_drive_reports()
+    
+    if not files:
+        st.info("No reports found in Google Drive yet.")
+        return
+
+    for file in files:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write(f"📄 **{file['name']}**")
+            st.caption(f"Created: {file['createdTime'][:10]}")
+        with col2:
+            st.markdown(f"[🔗 View in Drive]({file['webViewLink']})")
+        st.divider()
+
 # Tool Router
 if tool == "Trademark Status Report":
     status_report.run()

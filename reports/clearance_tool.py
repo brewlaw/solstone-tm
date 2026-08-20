@@ -179,6 +179,15 @@ def run():
 
                 st.success("Search & Report Generation Complete!")
 
+                # --- GOOGLE DRIVE UPLOAD ---
+                from utils.drive_uploader import upload_to_drive
+                
+                pdf_drive_link = upload_to_drive(pdf_filename)
+                docx_drive_link = upload_to_drive(docx_filename)
+
+                if pdf_drive_link or docx_drive_link:
+                    st.info("☁️ Reports permanently archived to Google Drive!")
+
                 with open(pdf_filename, "rb") as f:
                     st.download_button("Download PDF Report", f, file_name=f"{base_filename}.pdf", mime="application/pdf")
                 with open(docx_filename, "rb") as f:
