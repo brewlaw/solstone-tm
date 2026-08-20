@@ -177,7 +177,7 @@ def run():
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 doc.add_paragraph(f"Owner Searched:\t{owner_name}").runs[0].bold = True
-        doc.add_paragraph(f"Class Filter:\t{ic_classes if ic_classes else 'All Live Classes'}").runs[0].bold = True
+        doc.add_paragraph(f"Class Filter:\t\t{ic_classes if ic_classes else 'All Live Classes'}").runs[0].bold = True
         doc.add_paragraph(f"Date Generated:\t{datetime.now().strftime('%B %d, %Y')}").runs[0].bold = True
         doc.add_paragraph()
 
