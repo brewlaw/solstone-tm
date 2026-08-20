@@ -57,3 +57,17 @@ def list_drive_reports():
     except Exception as e:
         st.error(f"Error fetching files from Google Drive: {e}")
         return []
+
+def trash_drive_file(file_id):
+    """Moves a specific file to the trash in the Google Workspace Shared Drive."""
+    try:
+        service = get_drive_service()
+        service.files().update(
+            fileId=file_id,
+            body={'trashed': True},
+            supportsAllDrives=True
+        ).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error trashing file on Google Drive: {e}")
+        return False

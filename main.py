@@ -28,9 +28,9 @@ tool = st.sidebar.radio(
 
 def show_drive_archive():
     st.header("Solstone Cloud Report Archive")
-    st.write("Access all historically generated clearance, status, and monitoring reports stored on Google Drive.")
+    st.write("Access and manage all historically generated reports stored on Google Drive.")
     
-    from utils.drive_uploader import list_drive_reports
+    from utils.drive_uploader import list_drive_reports, trash_drive_file
     with st.spinner("Fetching reports from Google Drive..."):
         files = list_drive_reports()
     
@@ -39,12 +39,24 @@ def show_drive_archive():
         return
 
     for file in files:
-        col1, col2 = st.columns([3, 1])
+        # Changed to 3 columns to make room for the delete button
+        col1, col2, col3 = st.columns([6, 2, 2])
+        
         with col1:
             st.write(f"📄 **{file['name']}**")
             st.caption(f"Created: {file['createdTime'][:10]}")
+            
         with col2:
             st.markdown(f"[🔗 View in Drive]({file['webViewLink']})")
+            
+        with col3:
+            # We use the unique Google Drive file ID as the button key
+            if st.button("🗑️ Delete", key=f"del_{file['id']}", use_container_width=True):
+                with st.spinner("Moving to trash..."):
+                    if trash_drive_file(file['id']):
+                        st.toast(f"Report moved to trash!")
+                        st.rerun() # Instantly refreshes the page to remove the file from the list
+                        
         st.divider()
 
 # Tool Router
