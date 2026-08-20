@@ -10,7 +10,6 @@ from scrapers.ttb_scraper import scrape_ttb
 from scrapers.google_scraper import scrape_google
 from reports.pdf_generator import generate_pdf
 from reports.docx_generator_2 import generate_docx_2 
-from analyzers.section_2e_analyzer import Section2EAnalyzer
 
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
@@ -20,10 +19,8 @@ def run():
     st.header("Full Trademark Clearance Search")
     st.write("Run a comprehensive, all-time clearance search across USPTO, TTB, and Google.")
 
-    analyzer = Section2EAnalyzer(data_dir="data")
-    feedback_summary = []
-
-    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
+    if 'clearance_report_data' not in st.session_state:
+        st.session_state['clearance_report_data'] = None
 
     col1, col2 = st.columns(2)
     with col1:
@@ -31,6 +28,8 @@ def run():
         attention_name = st.text_input("Attention Name (e.g. Adeline Druart):")
     with col2:
         client_email = st.text_input("Client Email(s):")
+
+    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
 
     st.subheader("Search Term Expansions")
     st.caption("Expand your search to catch variations, sound-alikes, meaning-alikes, and substrings.")
@@ -50,7 +49,6 @@ def run():
         squished_mark = raw_mark.replace(" ", "")
         today = datetime.datetime.now()
 
-        # Build Original USPTO & TTB Queries
         words = raw_mark.split()
         web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
         uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
@@ -126,21 +124,16 @@ def run():
                     
                     raw_ttb_data = []
                     for start_date, end_date in ttb_chunks:
-                        # OPEN A FRESH TAB FOR EVERY SINGLE CHUNK
                         chunk_page = context.new_page()
-                        
                         chunk_results = scrape_ttb(chunk_page, start_date, end_date, list(set(ttb_marks_list)))
                         if chunk_results:
                             raw_ttb_data.extend(chunk_results)
-                            
-                        # CLOSE THE TAB SO IT DOESN'T INTERFERE WITH THE NEXT CHUNK
                         chunk_page.close()
                     
                     context.close()
                     browser.close() 
                     gc.collect()
                     
-                    # Deduplicate TTB data in case a COLA overlaps the chunk dates
                     unique_ttb = {item['ttb_id']: item for item in raw_ttb_data}
                     ttb_data = list(unique_ttb.values())
 
@@ -167,24 +160,52 @@ def run():
                     report_title=report_title,
                     page_data=page_data,
                     output_filename=docx_filename,
-                    feedback_summary=feedback_summary
+                    feedback_summary=[]
                 )
 
-                st.success("Search & Report Generation Complete!")
-
-                # --- GOOGLE DRIVE UPLOAD ---
-                from utils.drive_uploader import upload_to_drive
-                
-                pdf_drive_link = upload_to_drive(pdf_filename)
-                docx_drive_link = upload_to_drive(docx_filename)
-
-                if pdf_drive_link or docx_drive_link:
-                    st.info("☁️ Reports permanently archived to Google Drive!")
-
                 with open(pdf_filename, "rb") as f:
-                    st.download_button("Download PDF Report", f, file_name=f"{base_filename}.pdf", mime="application/pdf")
+                    pdf_bytes = f.read()
                 with open(docx_filename, "rb") as f:
-                    st.download_button("Download Word Doc Report", f, file_name=f"{base_filename}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                    docx_bytes = f.read()
+
+                st.session_state['clearance_report_data'] = {
+                    'base_filename': base_filename,
+                    'pdf_filename': pdf_filename,
+                    'docx_filename': docx_filename,
+                    'pdf_bytes': pdf_bytes,
+                    'docx_bytes': docx_bytes
+                }
 
             except Exception as e:
                 st.error(f"Error during search execution: {e}")
+
+    # --- DISPLAY REPORT OUTPUTS IF GENERATED ---
+    if st.session_state.get('clearance_report_data'):
+        c_data = st.session_state['clearance_report_data']
+        st.success("Search & Report Generation Complete!")
+
+        col_d1, col_d2, col_d3 = st.columns(3)
+        with col_d1:
+            st.download_button(
+                "📥 Download PDF Report",
+                c_data['pdf_bytes'],
+                file_name=f"{c_data['base_filename']}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        with col_d2:
+            st.download_button(
+                "📄 Download Word Doc Report",
+                c_data['docx_bytes'],
+                file_name=f"{c_data['base_filename']}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
+        with col_d3:
+            if st.button("☁️ Archive to Google Drive", use_container_width=True, key="archive_clearance"):
+                from utils.drive_uploader import upload_to_drive
+                with st.spinner("Archiving reports to Google Drive..."):
+                    pdf_link = upload_to_drive(c_data['pdf_filename'])
+                    docx_link = upload_to_drive(c_data['docx_filename'])
+                if pdf_link or docx_link:
+                    st.success("☁️ Clearance reports successfully archived to Google Drive!")

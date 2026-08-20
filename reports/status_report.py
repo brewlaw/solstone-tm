@@ -40,6 +40,10 @@ def run():
 
     exclude_marks = st.text_input("Marks to Exclude (optional, comma-separated)", placeholder="e.g. ABC ALE")
 
+    # Store state so clicking "Archive to Google Drive" doesn't reset the view
+    if 'status_report_data' not in st.session_state:
+        st.session_state['status_report_data'] = None
+
     if st.button("Generate Status Report", type="primary"):
         if not owner_name.strip():
             st.warning("Please enter an Owner/Applicant Name.")
@@ -77,6 +81,7 @@ def run():
 
         if not raw_results:
             st.info("No live marks found matching your query.")
+            st.session_state['status_report_data'] = None
             return
 
         df = pd.DataFrame(raw_results)
@@ -90,8 +95,6 @@ def run():
         report_df = df[['mark', 'serial', 'reg_number', 'status', 'next_deadline', 'reg_date', 'goods']].copy()
         report_df.columns = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Registration Date', 'Goods & Services']
 
-        st.success(f"Found {len(report_df)} mark(s)!")
-        
         # --- PREPARE DATA WITH EMBEDDED IMAGE TAGS ---
         html_df = report_df.copy()
         html_df['Mark'] = html_df.apply(
@@ -99,26 +102,7 @@ def run():
             axis=1
         )
         
-        # Generate the raw HTML table string
         raw_html_table = html_df.to_html(index=False, escape=False)
-        
-        # --- WEB APP DISPLAY DATAFRAME ---
-        # The HTML block MUST NOT be indented, or Streamlit will treat it as a code block.
-        st.markdown(
-            f"""
-<style>
-    .custom-table {{ border-collapse: collapse; width: 100%; font-size: 14px; margin-bottom: 20px; font-family: sans-serif; }}
-    .custom-table th, .custom-table td {{ border: 1px solid #e0e0e0; padding: 12px; text-align: left; vertical-align: middle; }}
-    .custom-table th {{ background-color: #f7f7f9; font-weight: 600; color: #31333F; border-bottom: 2px solid #e0e0e0; }}
-    .custom-table tr:nth-child(even) {{ background-color: #fbfbfb; }}
-    .custom-table img {{ max-height: 70px; max-width: 100px; object-fit: contain; }}
-</style>
-<div style="overflow-x: auto; border-radius: 8px; border: 1px solid #e0e0e0;">
-    {raw_html_table.replace('<table border="1" class="dataframe">', '<table class="custom-table">')}
-</div>
-            """,
-            unsafe_allow_html=True
-        )
 
         # --- HTML DATAFRAME (FOR DOWNLOAD) ---
         html_report = f"""
@@ -253,7 +237,6 @@ def run():
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        # Output the PDF with its correct filename so it uploads to Drive with the right name
         proper_filename = f"Trademark_Report_{owner_name.replace(' ', '_')}.pdf"
         proper_filepath = os.path.join(tempfile.gettempdir(), proper_filename)
         pdf.output(proper_filepath)
@@ -261,19 +244,45 @@ def run():
         with open(proper_filepath, "rb") as f:
             pdf_bytes = f.read()
 
-        # --- GOOGLE DRIVE UPLOAD ---
-        from utils.drive_uploader import upload_to_drive
-        pdf_drive_link = upload_to_drive(proper_filepath)
-        if pdf_drive_link:
-            st.info("☁️ Status Report permanently archived to Google Drive!")
+        st.session_state['status_report_data'] = {
+            'owner_name': owner_name,
+            'ic_classes': ic_classes,
+            'raw_html_table': raw_html_table,
+            'html_report': html_report,
+            'pdf_bytes': pdf_bytes,
+            'proper_filepath': proper_filepath,
+            'proper_filename': proper_filename,
+            'count': len(report_df)
+        }
 
-        dl_col1, dl_col2 = st.columns(2)
+    # --- DISPLAY GENERATED REPORT IF PRESENT IN SESSION STATE ---
+    if st.session_state.get('status_report_data'):
+        data = st.session_state['status_report_data']
+        st.success(f"Found {data['count']} mark(s)!")
+        
+        st.markdown(
+            f"""
+<style>
+    .custom-table {{ border-collapse: collapse; width: 100%; font-size: 14px; margin-bottom: 20px; font-family: sans-serif; }}
+    .custom-table th, .custom-table td {{ border: 1px solid #e0e0e0; padding: 12px; text-align: left; vertical-align: middle; }}
+    .custom-table th {{ background-color: #f7f7f9; font-weight: 600; color: #31333F; border-bottom: 2px solid #e0e0e0; }}
+    .custom-table tr:nth-child(even) {{ background-color: #fbfbfb; }}
+    .custom-table img {{ max-height: 70px; max-width: 100px; object-fit: contain; }}
+</style>
+<div style="overflow-x: auto; border-radius: 8px; border: 1px solid #e0e0e0;">
+    {data['raw_html_table'].replace('<table border="1" class="dataframe">', '<table class="custom-table">')}
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
         
         with dl_col1:
             st.download_button(
                 label="📄 Download HTML Report",
-                data=html_report,
-                file_name=f"Trademark_Report_{owner_name.replace(' ', '_')}.html",
+                data=data['html_report'],
+                file_name=f"Trademark_Report_{data['owner_name'].replace(' ', '_')}.html",
                 mime="text/html",
                 use_container_width=True
             )
@@ -281,8 +290,18 @@ def run():
         with dl_col2:
             st.download_button(
                 label="📥 Download PDF Report",
-                data=pdf_bytes,
-                file_name=proper_filename,
+                data=data['pdf_bytes'],
+                file_name=data['proper_filename'],
                 mime="application/pdf",
                 use_container_width=True
             )
+
+        with dl_col3:
+            if st.button("☁️ Archive to Google Drive", use_container_width=True):
+                from utils.drive_uploader import upload_to_drive
+                with st.spinner("Archiving report to Google Drive..."):
+                    with open(data['proper_filepath'], "wb") as f:
+                        f.write(data['pdf_bytes'])
+                    drive_link = upload_to_drive(data['proper_filepath'])
+                if drive_link:
+                    st.success("☁️ Report successfully archived to Google Drive!")

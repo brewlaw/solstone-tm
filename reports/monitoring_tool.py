@@ -11,7 +11,6 @@ from scrapers.ttb_scraper import scrape_ttb
 from scrapers.google_scraper import scrape_google
 from reports.pdf_generator import generate_pdf
 from reports.docx_generator_2 import generate_docx_2 
-from analyzers.section_2e_analyzer import Section2EAnalyzer
 
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
@@ -20,7 +19,6 @@ if not os.path.exists(OUTPUT_DIR):
 def get_dynamic_names(timeframe, raw_mark):
     today = datetime.date.today()
     current_year = today.year
-    
     clean_mark = re.sub(r'[\/*?:"<>|]', '', raw_mark).strip().upper()
     
     base_filename = f"{clean_mark}_Monitoring_Report_Raw_Results"
@@ -33,7 +31,6 @@ def get_dynamic_names(timeframe, raw_mark):
             3: datetime.date(current_year, 9, 30),
             4: datetime.date(current_year, 12, 31)
         }
-        
         closest_q = None
         target_year = current_year
         min_delta = float('inf')
@@ -75,10 +72,8 @@ def run():
     st.header("Trademark Monitoring Suite")
     st.write("Run time-constrained monitoring sweeps across USPTO, TTB, and Google.")
 
-    analyzer = Section2EAnalyzer(data_dir="data")
-    feedback_summary = []
-
-    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
+    if 'monitoring_report_data' not in st.session_state:
+        st.session_state['monitoring_report_data'] = None
 
     col1, col2 = st.columns(2)
     with col1:
@@ -87,6 +82,8 @@ def run():
     with col2:
         client_email = st.text_input("Client Email(s):")
         lookback_years = st.number_input("Lookback Years:", min_value=0.1, max_value=5.0, value=1.0, step=0.25)
+
+    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
 
     st.subheader("Search Term Expansions")
     st.caption("Expand your search to catch variations, sound-alikes, meaning-alikes, and substrings.")
@@ -106,7 +103,6 @@ def run():
         squished_mark = raw_mark.replace(" ", "")
         today = datetime.datetime.now()
         
-        # Calculate Date Bounds for Monitoring
         timeframe = lookback_years
         start_date = today - timedelta(days=(timeframe * 365.25))
 
@@ -117,7 +113,6 @@ def run():
         uspto_date_from = start_date.strftime("%Y%m%d")
         google_date_from = start_date.strftime("%Y-%m-%d")
 
-        # Build Original USPTO & TTB Queries
         words = raw_mark.split()
         web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
         uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
@@ -142,7 +137,6 @@ def run():
             secondary_terms.append(f"(CM2:*{substring_term}*)")
             ttb_marks_list.append(f"%{substring_term}%")
 
-        # USPTO Strict Date Filters
         class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
         date_filter = f" AND FD:[{uspto_date_from} TO {uspto_date_to}]" 
 
@@ -179,16 +173,14 @@ def run():
                     browser.close() 
                     gc.collect()
 
-                    # --- 2. Run TTB Search (Single Pass) ---
+                    # --- 2. Run TTB Search ---
                     browser = p.chromium.launch(headless=True, args=cloud_args)
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         accept_downloads=True
                     )
                     page = context.new_page()
-                    
                     ttb_data = scrape_ttb(page, ttb_date_from, ttb_date_to, list(set(ttb_marks_list)))
-                    
                     context.close()
                     browser.close() 
                     gc.collect()
@@ -213,24 +205,52 @@ def run():
                     report_title=report_title,
                     page_data=page_data,
                     output_filename=docx_filename,
-                    feedback_summary=feedback_summary
+                    feedback_summary=[]
                 )
 
-                st.success("Monitoring Search & Report Generation Complete!")
-
-                # --- GOOGLE DRIVE UPLOAD ---
-                from utils.drive_uploader import upload_to_drive
-                
-                pdf_drive_link = upload_to_drive(pdf_filename)
-                docx_drive_link = upload_to_drive(docx_filename)
-
-                if pdf_drive_link or docx_drive_link:
-                    st.info("☁️ Monitoring reports permanently archived to Google Drive!")
-
                 with open(pdf_filename, "rb") as f:
-                    st.download_button("Download PDF Report", f, file_name=f"{base_filename}.pdf", mime="application/pdf")
+                    pdf_bytes = f.read()
                 with open(docx_filename, "rb") as f:
-                    st.download_button("Download Word Doc Report", f, file_name=f"{base_filename}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                    docx_bytes = f.read()
+
+                st.session_state['monitoring_report_data'] = {
+                    'base_filename': base_filename,
+                    'pdf_filename': pdf_filename,
+                    'docx_filename': docx_filename,
+                    'pdf_bytes': pdf_bytes,
+                    'docx_bytes': docx_bytes
+                }
 
             except Exception as e:
                 st.error(f"Error during search execution: {e}")
+
+    # --- DISPLAY REPORT OUTPUTS IF GENERATED ---
+    if st.session_state.get('monitoring_report_data'):
+        m_data = st.session_state['monitoring_report_data']
+        st.success("Monitoring Search & Report Generation Complete!")
+
+        col_d1, col_d2, col_d3 = st.columns(3)
+        with col_d1:
+            st.download_button(
+                "📥 Download PDF Report",
+                m_data['pdf_bytes'],
+                file_name=f"{m_data['base_filename']}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        with col_d2:
+            st.download_button(
+                "📄 Download Word Doc Report",
+                m_data['docx_bytes'],
+                file_name=f"{m_data['base_filename']}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
+        with col_d3:
+            if st.button("☁️ Archive to Google Drive", use_container_width=True, key="archive_monitoring"):
+                from utils.drive_uploader import upload_to_drive
+                with st.spinner("Archiving reports to Google Drive..."):
+                    pdf_link = upload_to_drive(m_data['pdf_filename'])
+                    docx_link = upload_to_drive(m_data['docx_filename'])
+                if pdf_link or docx_link:
+                    st.success("☁️ Monitoring reports successfully archived to Google Drive!")
