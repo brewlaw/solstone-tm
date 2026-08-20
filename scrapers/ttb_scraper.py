@@ -20,25 +20,35 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                 if attempt > 0:
                     print(f"    -> TTB Connection Retry {attempt + 1}/3...")
                     
-                # Added domcontentloaded so it doesn't wait for heavy images to finish
+                # Use domcontentloaded to avoid cloud timeouts on heavy images
                 page.goto("https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do", timeout=30000, wait_until="domcontentloaded")
                 
                 if page.locator("input[value='I Agree']").is_visible():
                     page.locator("input[value='I Agree']").evaluate("node => node.click()")
-                    time.sleep(5)
+                    page.wait_for_timeout(3000)
                     
                 print("    [DEBUG] Filling TTB form data...")
-                text_boxes = page.locator("input[type='text']")
-                text_boxes.nth(0).fill(ttb_date_from)
-                text_boxes.nth(1).fill(ttb_date_to)
-                text_boxes.nth(2).fill(mark) 
+                # Robust input targeting
+                try:
+                    page.locator("input[name='dateFrom']").fill(ttb_date_from)
+                    page.locator("input[name='dateTo']").fill(ttb_date_to)
+                    page.locator("input[name='brandName']").fill(mark)
+                except Exception:
+                    text_boxes = page.locator("input[type='text']")
+                    text_boxes.nth(0).fill(ttb_date_from)
+                    text_boxes.nth(1).fill(ttb_date_to)
+                    text_boxes.nth(2).fill(mark) 
                 
                 print("    [DEBUG] Selecting 'Either' for Brand Name / Fanciful Name...")
-                page.locator("text='Either'").last.evaluate("node => node.click()")
-                time.sleep(0.5)
+                try:
+                    page.locator("input[value='E']").evaluate("node => node.click()")
+                except Exception:
+                    page.locator("text='Either'").last.evaluate("node => node.click()")
+                    
+                page.wait_for_timeout(500)
                 
                 page.locator("input[value='Search']").evaluate("node => node.click()")
-                time.sleep(5) 
+                page.wait_for_timeout(5000) 
                 
                 if page.locator("text='Save Search Results To File'").is_visible() or page.locator("table").first.is_visible():
                     variation_count = 0
@@ -78,7 +88,7 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                             else:
                                 print("    [DEBUG] Flipping to the next page of results...")
                                 next_btn.evaluate("node => node.click()")
-                                time.sleep(3) 
+                                page.wait_for_timeout(3000) 
                         else:
                             break 
                             
@@ -93,7 +103,7 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                 print(f"    TTB Scraper error: {e}")
                 if attempt < 2:
                     print("    🚨 TTB Server glitched. Waiting 5 seconds and refreshing...")
-                    time.sleep(5)
+                    page.wait_for_timeout(5000)
                 else:
                     print(f"    🚨 TTB Scraper failed for '{mark}' after 3 attempts.")
                     
