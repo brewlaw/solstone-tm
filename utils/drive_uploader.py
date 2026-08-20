@@ -13,7 +13,7 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def upload_to_drive(file_path):
-    """Uploads a local file to the shared Google Drive folder and returns its web link."""
+    """Uploads a local file to the Google Workspace Shared Drive and returns its web link."""
     try:
         service = get_drive_service()
         folder_id = st.secrets["FOLDER_ID"]
@@ -28,7 +28,8 @@ def upload_to_drive(file_path):
         uploaded_file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id, webViewLink'
+            fields='id, webViewLink',
+            supportsAllDrives=True  # MANDATORY FOR SHARED DRIVES
         ).execute()
 
         return uploaded_file.get('webViewLink')
@@ -37,7 +38,7 @@ def upload_to_drive(file_path):
         return None
 
 def list_drive_reports():
-    """Fetches all uploaded reports from the Google Drive folder for display."""
+    """Fetches all uploaded reports from the Google Workspace Shared Drive."""
     try:
         service = get_drive_service()
         folder_id = st.secrets["FOLDER_ID"]
@@ -47,7 +48,9 @@ def list_drive_reports():
             q=query,
             pageSize=50,
             fields="files(id, name, mimeType, createdTime, webViewLink)",
-            orderBy="createdTime desc"
+            orderBy="createdTime desc",
+            includeItemsFromAllDrives=True, # MANDATORY FOR SHARED DRIVES
+            supportsAllDrives=True          # MANDATORY FOR SHARED DRIVES
         ).execute()
 
         return results.get('files', [])
