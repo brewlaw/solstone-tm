@@ -1,15 +1,12 @@
 import streamlit as st
 import time
 import re
+import gc
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# ADD THIS LINE BACK IN:
-from utils import run_uspto_bridging_search 
-
-
-# --- KEEP YOUR EXISTING IMPORTS AT THE TOP ---
-# (e.g., from utils import run_uspto_bridging_search)
+# Import your actual USPTO scraper
+from scrapers.uspto_scraper import scrape_uspto
 
 # ==========================================
 # 1. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
@@ -19,6 +16,7 @@ def fetch_tsdr_data(serial_number, target_classes):
     if not serial_number: return None, None
         
     max_retries = 3
+    
     for attempt in range(max_retries):
         try:
             with sync_playwright() as p:
@@ -42,13 +40,14 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
+                # BULLETPROOF WAIT: Wait for the actual data value boxes to physically attach to the DOM
                 try:
-                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                    page.wait_for_selector("div.value", state="attached", timeout=15000)
                 except:
                     try:
                         page.locator('#searchNumber').fill(serial_number)
                         page.locator('#searchNumber').press("Enter")
-                        page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                        page.wait_for_selector("div.value", state="attached", timeout=15000)
                     except:
                         pass 
                     
@@ -102,6 +101,11 @@ def fetch_tsdr_data(serial_number, target_classes):
                 goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
                 
                 browser.close()
+                
+                # SAFEGUARD: If it somehow still pulled blank data, throw an error to force a retry!
+                if mark_name == "Unknown Mark":
+                    raise Exception("Page loaded but data was missing. Retrying...")
+                    
                 return mark_name, goods_text
                 
         except Exception as e:
@@ -132,14 +136,21 @@ def run():
         app_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", key="applicant_class")
 
     if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Bypassing USPTO Firewall & Scraping Data..."):
+        # Prevent Memory Spikes (Code: 1ST Error)
+        with st.spinner("Scraping Client Data (Browser 1 of 2)..."):
             c_mark, c_goods = fetch_tsdr_data(client_sn, client_class)
-            a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
-            
             st.session_state['c_mark'] = c_mark
-            st.session_state['a_mark'] = a_mark
             st.session_state['c_goods'] = c_goods
+            
+        gc.collect() 
+        time.sleep(2) 
+
+        with st.spinner("Scraping Applicant Data (Browser 2 of 2)..."):
+            a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
+            st.session_state['a_mark'] = a_mark
             st.session_state['a_goods'] = a_goods
+            
+        st.rerun()
 
     st.info("Trim down the text below to isolate the exact goods/services you want to cross-reference.")
 
@@ -176,8 +187,28 @@ def run():
             # The Exact Search Query with the Live Document parameter
             search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class} AND LD:true'
             
-            # NOTE: Make sure run_uspto_bridging_search is imported at the top!
-            results_df = run_uspto_bridging_search(search_query, max_results=20)
+            # Execute search using your real USPTO Scraper
+            raw_results = []
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-dev-shm-usage']
+                    )
+                    page = browser.new_page()
+                    excel_out = "temp_bridging_search.xlsx" 
+                    
+                    raw_results = scrape_uspto(
+                        page=page,
+                        primary_query=search_query,
+                        excel_filename=excel_out
+                    )
+                    browser.close()
+            except Exception as e:
+                st.error(f"Error scraping USPTO: {e}")
+                st.stop()
+                
+            results_df = pd.DataFrame(raw_results)
             
             if results_df.empty:
                 st.warning(f"No bridging registrations found for query: `{search_query}`. Try broadening your keywords.")
@@ -198,7 +229,11 @@ def run():
                             
                     return "\n\n".join(filtered) if filtered else text
                 
-                col_name = "Goods & services" if "Goods & services" in results_df.columns else "Goods"
+                # Check for the dynamic column name your scraper creates
+                col_name = "goods" if "goods" in results_df.columns else "Goods"
+                if col_name not in results_df.columns and "Goods & services" in results_df.columns:
+                    col_name = "Goods & services"
+                    
                 if col_name in results_df.columns:
                     results_df[col_name] = results_df[col_name].apply(lambda x: clean_goods(x, c_class, t_class))
 
@@ -223,7 +258,8 @@ def run():
             hide_index=True,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", help="Check to include in LOP"),
-                "Goods & services": st.column_config.TextColumn("Filtered Goods", width="large"),
-                "Goods": st.column_config.TextColumn("Filtered Goods", width="large")
+                "goods": st.column_config.TextColumn("Filtered Goods", width="large"),
+                "Goods": st.column_config.TextColumn("Filtered Goods", width="large"),
+                "Goods & services": st.column_config.TextColumn("Filtered Goods", width="large")
             }
         )
