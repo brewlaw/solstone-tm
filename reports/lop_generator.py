@@ -16,12 +16,9 @@ def format_class_input(class_input):
 # ---------------------------------------------------------
 # SCRAPERS
 # ---------------------------------------------------------
-import re  # Put this at the very top of your file with the other imports!
-
-import re
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by targeting the exact HTML DOM elements for 'Mark:' and 'For:'."""
+    """Scrapes TSDR by mimicking human typing and targeting exact HTML tags."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -43,27 +40,32 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            # 1. Go to the TSDR home page and search
-            page.goto("https://tsdr.uspto.gov/", timeout=30000, wait_until="domcontentloaded")
-            page.locator('#searchNumber').fill(serial_number)
-            page.locator('#statusSearchButton').click()
+            # 1. Go to the TSDR home page
+            page.goto("https://tsdr.uspto.gov/", timeout=30000, wait_until="networkidle")
             
-            # 2. Wait for the page structure to load by looking for the "Mark:" key
+            # 2. Type the serial number into the search box
+            search_box = page.locator('#searchNumber')
+            search_box.wait_for(state="visible", timeout=10000)
+            search_box.fill(serial_number)
+            
+            # 3. Hit the "Enter" key on the keyboard to submit the search
+            search_box.press("Enter")
+            
+            # 4. Wait for the page structure to load by looking for the "Mark:" key
             page.wait_for_selector("div.key:has-text('Mark:')", timeout=15000)
             
-            # 3. Extract Mark Name using the exact HTML structure
+            # 5. Extract Mark Name using the exact HTML structure
             mark_name = "Unknown Mark"
             mark_locator = page.locator("div.row:has(div.key:has-text('Mark:')) > div.value").first
             if mark_locator.count() > 0:
                 mark_name = mark_locator.text_content().strip()
 
-            # 4. Extract Goods and Services using the exact HTML "For:" key
+            # 6. Extract Goods and Services using the exact HTML "For:" key
             goods_locators = page.locator("div.row:has(div.key:has-text('For:')) > div.value")
             goods_count = goods_locators.count()
             
             if goods_count > 0:
                 goods_list = []
-                # Loop through all classes/goods listed and combine them
                 for i in range(goods_count):
                     text = goods_locators.nth(i).text_content()
                     if text:
@@ -79,6 +81,8 @@ def fetch_tsdr_data(serial_number, target_classes):
             return mark_name, goods_text
             
         except Exception as e:
+            # Fallback to take a picture so we can see what went wrong
+            page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
 
