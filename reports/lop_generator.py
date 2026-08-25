@@ -19,7 +19,7 @@ def format_class_input(class_input):
 
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by dumping the entire Goods container and cleaning it in Python."""
+    """Scrapes TSDR by dumping the entire raw text of the page and slicing it in Python."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -41,22 +41,21 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            # 1. Use the direct URL
+            # 1. Navigate to the direct URL
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000)
             
-            # 2. Hard pause for 5 seconds to let the USPTO Javascript render the page
+            # 2. Hard pause for 5 seconds to let the USPTO load
             page.wait_for_timeout(5000)
             
             if "Access Denied" in page.content():
                 browser.close()
                 return None, "USPTO Firewall Blocked the Connection."
 
-            # 3. Inject basic Javascript just to find the container and grab ALL text inside it
+            # 3. Inject JS to get the Mark Name (which we know works!) and the RAW TEXT of the entire page
             js_extract = """
             () => {
                 let markName = "Unknown Mark";
-                
                 let keys = document.querySelectorAll('div.key');
                 for (let k of keys) {
                     let text = k.textContent.trim();
@@ -68,39 +67,36 @@ def fetch_tsdr_data(serial_number, target_classes):
                         }
                     }
                 }
-
-                let goodsText = "Could not find Goods & Services container. Please manually paste.";
-                let headers = document.querySelectorAll('div.expand-collapse');
-                let gsHeader = Array.from(headers).find(h => h.textContent.match(/Goods (and|&) Services/i));
                 
-                if (gsHeader) {
-                    let container = gsHeader.nextElementSibling;
-                    if (container && container.classList.contains('toggle_container')) {
-                        // Extract all text, completely ignoring how the USPTO formats it
-                        goodsText = container.textContent;
-                    }
-                }
-                
-                return { mark: markName, goods: goodsText };
+                // Return the Mark Name, and literally every word on the page ignoring HTML
+                return { mark: markName, full_text: document.body.textContent };
             }
             """
             
             result = page.evaluate(js_extract)
             mark_name = result.get('mark', 'Unknown Mark')
-            raw_goods = result.get('goods', '')
+            full_text = result.get('full_text', '')
             
-            # 4. Clean up the extracted text using Python
-            # Remove the massive generic amendment note the USPTO puts at the top
-            clean_goods = re.sub(r'(?i)Note:.*?identify additional \(new\) wording in the goods/services\.', '', raw_goods, flags=re.DOTALL)
+            # 4. Use Python Regex to slice out just the Goods & Services block
+            goods_match = re.search(r'(?i)Goods\s*(?:and|&)\s*Services(.*?)(?:Basis Information|Current Owner|Mark Information|Standard Character)', full_text, re.DOTALL)
             
-            # Remove the "For:" label if it exists just to make it cleaner
-            clean_goods = clean_goods.replace("For:", "")
-            
-            # Strip out excessive invisible tabs and blank lines
-            clean_goods = re.sub(r'\t+', '', clean_goods)
-            clean_goods = re.sub(r'\n{3,}', '\n\n', clean_goods)
-            goods_text = clean_goods.strip()
-            
+            if goods_match:
+                raw_goods = goods_match.group(1)
+                
+                # Strip out the generic USPTO amendment warnings
+                clean_goods = re.sub(r'(?i)Note:\s*The following symbols.*?identify additional \(new\) wording in the goods/services\.', '', raw_goods, flags=re.DOTALL)
+                clean_goods = clean_goods.replace("For:", "")
+                
+                # Strip out the Class Status info at the bottom so we are left with just the goods
+                clean_goods = re.sub(r'(?i)International Class\(es\):.*', '', clean_goods, flags=re.DOTALL)
+                clean_goods = re.sub(r'(?i)U\.S Class\(es\):.*', '', clean_goods, flags=re.DOTALL)
+                
+                # Clean up the spacing
+                lines = [line.strip() for line in clean_goods.split('\n') if line.strip()]
+                goods_text = "\n".join(lines)
+            else:
+                goods_text = "Goods boundaries not found. Please manually copy from TSDR."
+
             browser.close()
             return mark_name, goods_text
             
