@@ -272,14 +272,6 @@ def run():
             if results_df.empty:
                 st.warning(f"No bridging registrations found for query: `{search_query}`. Try checking different keyword boxes.")
             else:
-                # --- FIX 1: FILTER OUT N/A REGISTRATION NUMBERS ---
-                if 'reg_number' in results_df.columns:
-                    results_df = results_df[
-                        results_df['reg_number'].notna() & 
-                        (results_df['reg_number'] != 'N/A') & 
-                        (results_df['reg_number'].astype(str).str.strip() != '')
-                    ]
-                
                 # --- EXACT MATCH FILTER WITH SCORING ---
                 def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
                     if not isinstance(text, str): return text, 0
@@ -293,15 +285,12 @@ def run():
                         
                     filtered = []
                     score = 0
-                    found_classes = set()
                     
                     for match in segments:
                         cls_num = match.group(1)
                         raw_desc = match.group(2).strip().rstrip(';')
                         
-                        # --- FIX 2: ONLY PROCESS TARGET CLASSES ---
                         if cls_num in class_kws:
-                            found_classes.add(cls_num)
                             kws = class_kws[cls_num]
                             clauses = [c.strip() for c in raw_desc.split(';')]
                             
@@ -325,15 +314,15 @@ def run():
                                         
                                 if matched_exact:
                                     exact_matches.append(clause)
-                                    score += 100 
+                                    score += 100 # +100 for perfect standalone word
                                 elif matched_list:
                                     exact_matches.append(clause)
-                                    score += 50  
+                                    score += 50  # +50 for exact match in a comma list
                                 else:
                                     for kw in kws:
                                         if re.search(rf'\b{re.escape(kw)}\b', c_lower):
                                             partial_matches.append(clause)
-                                            score += 10 
+                                            score += 10 # +10 for partial regex match
                                             break
                                             
                             if exact_matches:
@@ -344,29 +333,22 @@ def run():
                                 display_desc = raw_desc
                                 
                             filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
-
-                    # --- FIX 3: SORTING BOOST FOR HAVING BOTH CLASSES ---
-                    if c_cls.lstrip('0') in found_classes and t_cls.lstrip('0') in found_classes:
-                        score += 1000
                             
-                    # --- FIX 4: STRICT FILTERING & NEWLINES ---
-                    # Removed the "else text" fallback. Added \n\n for better spacing.
-                    return "\n\n".join(filtered) if filtered else "No matching target classes found.", score
+                    return "\n".join(filtered) if filtered else text, score
                 
                 col_name = "goods" if "goods" in results_df.columns else "Goods"
                 if col_name not in results_df.columns and "Goods & services" in results_df.columns:
                     col_name = "Goods & services"
                     
                 if col_name in results_df.columns:
+                    # Apply function and separate the formatted text and the score
                     applied = results_df[col_name].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
                     results_df[col_name] = applied.apply(lambda x: x[0] if isinstance(x, tuple) else x)
                     results_df['MatchScore'] = applied.apply(lambda x: x[1] if isinstance(x, tuple) else 0)
                     
-                    # Ensure records missing target classes are dropped
-                    results_df = results_df[results_df[col_name] != "No matching target classes found."]
-                    
+                    # Sort by highest score first to put standalone matches at the very top!
                     results_df = results_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
-                    results_df = results_df.drop(columns=['MatchScore']) 
+                    results_df = results_df.drop(columns=['MatchScore']) # Hide the score from the UI
 
                 st.session_state['bridging_results'] = results_df
                 st.session_state['lop_step'] = 3
