@@ -18,8 +18,10 @@ def format_class_input(class_input):
 # ---------------------------------------------------------
 import re  # Put this at the very top of your file with the other imports!
 
+import re
+
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR using bulletproof Regex and a raw text fallback."""
+    """Scrapes TSDR by mimicking human typing and clicking Expand All."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -41,13 +43,28 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+            # 1. Go to the TSDR home page
+            page.goto("https://tsdr.uspto.gov/", timeout=30000, wait_until="domcontentloaded")
             
-            # Wait until all background API calls stop
-            page.goto(url, timeout=30000, wait_until="networkidle")
+            # 2. Type the serial number into the search box
+            page.locator('#searchNumber').fill(serial_number)
             
-            # Hard pause for 3 seconds to let the page visually render
-            page.wait_for_timeout(3000)
+            # 3. Click the "Status" button
+            page.locator('#statusSearchButton').click()
+            
+            # 4. Wait for the page to actually load the status data
+            page.wait_for_selector("text='Mark:'", timeout=15000)
+            
+            # 4.5. Click the "Expand All" button to reveal hidden accordion text!
+            try:
+                expand_btn = page.locator("text='Expand All'").first
+                expand_btn.wait_for(state="visible", timeout=3000)
+                expand_btn.click(force=True)
+            except:
+                pass # If it's already expanded or fails to click, keep going
+            
+            # Hard pause for 2 seconds to let the tables physically animate open
+            page.wait_for_timeout(2000)
             
             # Dump all the visible text on the page
             full_text = page.locator("body").inner_text()
@@ -56,40 +73,24 @@ def fetch_tsdr_data(serial_number, target_classes):
                 browser.close()
                 return None, f"USPTO Firewall Blocked the Connection."
 
-            # 1. Extract Mark Name using case-insensitive Regex
+            # 5. Extract Mark Name using case-insensitive Regex
             mark_name = "Design/Unknown Mark"
             mark_match = re.search(r'(?i)(?:Word Mark|Mark):\s*([^\n]+)', full_text)
             if mark_match:
                 mark_name = mark_match.group(1).strip()
 
-            # 2. Extract Goods and Services using bulletproof Regex
-            # This looks for "Goods and Services" or "Goods & Services" and grabs everything 
-            # until the next major section header, regardless of capitalization.
+            # 6. Extract Goods and Services using bulletproof Regex
             goods_match = re.search(r'(?i)Goods\s*(?:and|&)\s*Services(.*?)(?:Basis Information|Current Owner|Mark Information|Standard Character)', full_text, re.DOTALL)
             
             if goods_match:
                 goods_text = goods_match.group(1).strip()
             else:
-                # FALLBACK: If it STILL can't find the exact bounds, it will dump the raw text so you can manually trim it!
                 goods_text = f"--- COULD NOT FIND BOUNDARIES. RAW TEXT DUMP BELOW ---\n\n{full_text}"
             
             browser.close()
             return mark_name, goods_text
             
         except Exception as e:
-            browser.close()
-            return None, f"Error fetching data: {str(e)}"
-            
-            # Clean up the debug image if it succeeds
-            import os
-            if os.path.exists(f"debug_{serial_number}.png"):
-                os.remove(f"debug_{serial_number}.png")
-
-            browser.close()
-            return mark_name, goods_text
-            
-        except Exception as e:
-            page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
 
