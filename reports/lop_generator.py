@@ -356,7 +356,7 @@ def run():
                         filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
                         
                 # Use double-newlines so Streamlit stacks them perfectly
-                return "\n\n".join(filtered) if filtered else "", score
+                return "\n | ".join(filtered) if filtered else "", score
 
             # Apply Logic
             applied = ui_df['Raw Goods'].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
