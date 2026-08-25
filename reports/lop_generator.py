@@ -278,7 +278,7 @@ def run():
             st.markdown(f"**Mark:** {st.session_state.get('target_mark', '')}")
             core_target = st.text_area("Applicant Keywords", value=st.session_state.get('target_goods', ''), height=150)
             
-        # ==========================================
+       # ==========================================
         # STEP 2: BRIDGING SEARCH
         # ==========================================
         st.divider()
@@ -288,12 +288,15 @@ def run():
                 c_class = st.session_state.get('client_class_fmt', ["032"])[0] if st.session_state.get('client_class_fmt') else "032"
                 t_class = st.session_state.get('target_class_fmt', ["043"])[0] if st.session_state.get('target_class_fmt') else "043"
                 
+                # Strip out any accidental quotes the user might have typed
                 c_kw = core_client.strip().replace('"', '')
                 t_kw = core_target.strip().replace('"', '')
 
-                search_query = f'GS:"{c_kw}" AND GS:"{t_kw}" AND (IC:{c_class} AND IC:{t_class}) AND LD:true AND RN > 0'
+                # EXACT MATCH to your screenshot: GS:"bartending services" AND GS:"beer" AND IC:032 AND IC:043
+                search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class}'
                 
-                results_df = run_uspto_bridging_search(search_query, max_results=10)
+                # Fetching a few extra results so you have a good list to pick Registered marks from
+                results_df = run_uspto_bridging_search(search_query, max_results=20)
                 
                 if results_df.empty:
                     st.warning(f"No bridging registrations found for query: `{search_query}`. Try broadening your keywords.")
