@@ -16,7 +16,7 @@ def format_class_input(class_input):
 # SCRAPERS
 # ---------------------------------------------------------
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR with maximum stealth and takes a debug screenshot on failure."""
+    """Scrapes TSDR using text-based anchors instead of fragile HTML classes."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -41,27 +41,43 @@ def fetch_tsdr_data(serial_number, target_classes):
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000, wait_until="networkidle")
             
-            # Wait for either the mark element OR an Akamai block page
-            page.wait_for_selector("div.markElement, h1:has-text('Access Denied')", timeout=15000)
+            # Wait for the words "Goods and Services" to physically appear on the screen
+            page.wait_for_selector("text='Goods and Services', text='Access Denied', text='Request Rejected'", timeout=15000)
             
             if "Access Denied" in page.content() or "Request Rejected" in page.content():
                 page.screenshot(path=f"debug_{serial_number}.png")
                 browser.close()
                 return None, f"USPTO Firewall Blocked the Connection."
 
-            mark_name = page.locator("div.markElement").first.inner_text().strip() if page.locator("div.markElement").is_visible() else "Unknown Mark"
+            # Give JS an extra second to finish rendering the tables
+            page.wait_for_timeout(1500)
             
             full_text = page.locator("body").inner_text()
+            
+            # Extract Mark Name visually
+            mark_name = "Design/Unknown Mark"
+            if "Word Mark:" in full_text:
+                mark_name = full_text.split("Word Mark:")[1].split('\n')[0].strip()
+            elif "Mark:" in full_text:
+                mark_name = full_text.split("Mark:")[1].split('\n')[0].strip()
+
+            # Extract Goods by slicing the page text visually
             if "Goods and Services" in full_text:
                 goods_raw = full_text.split("Goods and Services")[-1].split("Basis Information")[0]
                 goods_text = goods_raw.strip()
             else:
                 goods_text = "Goods and Services section not found on page."
             
+            # Clean up the debug image if it succeeds!
+            import os
+            if os.path.exists(f"debug_{serial_number}.png"):
+                os.remove(f"debug_{serial_number}.png")
+
             browser.close()
             return mark_name, goods_text
             
         except Exception as e:
+            # If it still fails, take a picture so we can see what happened
             page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
