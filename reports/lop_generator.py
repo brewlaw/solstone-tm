@@ -19,7 +19,7 @@ def format_class_input(class_input):
 
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by dumping the entire raw text of the page and slicing it in Python."""
+    """Scrapes TSDR by forcing hidden containers visible and preserving native formatting."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -41,22 +41,28 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            # 1. Navigate to the direct URL
+            # 1. Go directly to the URL
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000)
             
-            # 2. Hard pause for 5 seconds to let the USPTO load
-            page.wait_for_timeout(5000)
+            # 2. WAIT for the USPTO data to actually load into the DOM (even if it's hidden inside a collapsed menu)
+            try:
+                page.wait_for_selector(".expand-collapse", state="attached", timeout=15000)
+            except Exception:
+                pass # If it times out, we will let the Javascript attempt it anyway
+            
+            # Hard pause for 2 extra seconds just to let the tables fully render
+            page.wait_for_timeout(2000)
             
             if "Access Denied" in page.content():
                 browser.close()
                 return None, "USPTO Firewall Blocked the Connection."
 
-            # 3. Inject JS to get the Mark Name (which we know works!) and the RAW TEXT of the entire page
+            # 3. Inject JS to force the hidden goods menu to open, then grab the text perfectly formatted
             js_extract = """
             () => {
                 let markName = "Unknown Mark";
-                let keys = document.querySelectorAll('div.key');
+                let keys = document.querySelectorAll('.key');
                 for (let k of keys) {
                     let text = k.textContent.trim();
                     if (text === 'Mark:' || text === 'Word Mark:') {
@@ -67,32 +73,41 @@ def fetch_tsdr_data(serial_number, target_classes):
                         }
                     }
                 }
+
+                let goodsText = "";
+                let headers = document.querySelectorAll('.expand-collapse');
+                for (let h of headers) {
+                    let hText = h.textContent || "";
+                    // Look for the Goods and Services header
+                    if (hText.includes('Goods') && hText.includes('Services')) {
+                        let container = h.nextElementSibling;
+                        if (container && container.classList.contains('toggle_container')) {
+                            // MAGIC TRICK: Force the browser to render the hidden box so innerText keeps all the line breaks!
+                            container.style.display = 'block';
+                            goodsText = container.innerText;
+                            break;
+                        }
+                    }
+                }
                 
-                // Return the Mark Name, and literally every word on the page ignoring HTML
-                return { mark: markName, full_text: document.body.textContent };
+                return { mark: markName, goods: goodsText };
             }
             """
             
             result = page.evaluate(js_extract)
             mark_name = result.get('mark', 'Unknown Mark')
-            full_text = result.get('full_text', '')
+            raw_goods = result.get('goods', '')
             
-            # 4. Use Python Regex to slice out just the Goods & Services block
-            goods_match = re.search(r'(?i)Goods\s*(?:and|&)\s*Services(.*?)(?:Basis Information|Current Owner|Mark Information|Standard Character)', full_text, re.DOTALL)
-            
-            if goods_match:
-                raw_goods = goods_match.group(1)
+            # 4. Clean up the extracted text using Python to remove USPTO boilerplate
+            if raw_goods:
+                clean = re.sub(r'(?i)Note:.*?identify additional \(new\) wording in the goods/services\.', '', raw_goods, flags=re.DOTALL)
+                clean = clean.replace("For:", "")
+                clean = re.sub(r'(?i)International Class\(es\):.*', '', clean, flags=re.DOTALL)
+                clean = re.sub(r'(?i)U\.S Class\(es\):.*', '', clean, flags=re.DOTALL)
+                clean = re.sub(r'(?i)Class Status:.*', '', clean, flags=re.DOTALL)
                 
-                # Strip out the generic USPTO amendment warnings
-                clean_goods = re.sub(r'(?i)Note:\s*The following symbols.*?identify additional \(new\) wording in the goods/services\.', '', raw_goods, flags=re.DOTALL)
-                clean_goods = clean_goods.replace("For:", "")
-                
-                # Strip out the Class Status info at the bottom so we are left with just the goods
-                clean_goods = re.sub(r'(?i)International Class\(es\):.*', '', clean_goods, flags=re.DOTALL)
-                clean_goods = re.sub(r'(?i)U\.S Class\(es\):.*', '', clean_goods, flags=re.DOTALL)
-                
-                # Clean up the spacing
-                lines = [line.strip() for line in clean_goods.split('\n') if line.strip()]
+                # Delete empty lines and space it nicely
+                lines = [line.strip() for line in clean.split('\n') if line.strip()]
                 goods_text = "\n".join(lines)
             else:
                 goods_text = "Goods boundaries not found. Please manually copy from TSDR."
