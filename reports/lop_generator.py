@@ -19,7 +19,7 @@ def format_class_input(class_input):
 
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by waiting for 'For:' and targeting row elements natively."""
+    """Scrapes TSDR by actively waiting for text to render, then natively targeting the DOM."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -45,20 +45,26 @@ def fetch_tsdr_data(serial_number, target_classes):
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000)
             
-            # 2. DYNAMIC WAIT: Wait specifically for the 'For:' label to attach to the page. 
-            # This completely solves the issue of the right side taking longer to load!
+            # 2. BULLETPROOF WAIT: Do not move forward until the word "Mark:" physically renders on the page.
             try:
-                page.wait_for_selector("div.key:has-text('For:')", state="attached", timeout=15000)
+                page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
             except:
-                pass # If it times out, we'll try to extract anyway just in case
+                # If the URL failed to auto-search, act like a human: type it in and hit enter.
+                try:
+                    page.locator('#searchNumber').fill(serial_number)
+                    page.locator('#searchNumber').press("Enter")
+                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                except:
+                    pass # Let it try to extract anyway
                 
-            page.wait_for_timeout(1500) # Quick buffer for the values to populate
+            # Quick 2-second buffer to let the rest of the tables finish popping in
+            page.wait_for_timeout(2000) 
             
             if "Access Denied" in page.content():
                 browser.close()
                 return None, "USPTO Firewall Blocked the Connection."
 
-            # 3. Inject JS to parse the rows exactly as shown in your screenshots
+            # 3. Inject JS to parse the rows exactly as shown in your inspector screenshots
             js_extract = """
             () => {
                 let markName = "Unknown Mark";
@@ -77,7 +83,7 @@ def fetch_tsdr_data(serial_number, target_classes):
                     }
                 }
                 
-                // Extract Goods by iterating over entire Rows (Bulletproof)
+                // Extract Goods by iterating over entire Rows (Avoids missing spaces)
                 let rows = document.querySelectorAll('div.row');
                 for (let row of rows) {
                     let keyNode = row.querySelector('div.key');
