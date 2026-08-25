@@ -291,7 +291,7 @@ def run():
             ui_df['Status'] = raw_df[status_col].astype(str) if status_col else "Live"
             ui_df['Raw Goods'] = raw_df[goods_col].astype(str)
             
-            # EXACT MATCH FILTER & SCORING ALGORITHM
+            # EXACT MATCH FILTER, SCORING, AND TRUNCATION ALGORITHM
             def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
                 if not isinstance(text, str): return "", 0
                 segments = re.finditer(r'IC\s*0*(\d+)[\s.:]+(.*?)(?=IC\s*\d+|$)', text, re.IGNORECASE | re.DOTALL)
@@ -346,16 +346,17 @@ def run():
                                         score += 10 
                                         break
                                         
+                        # TRUNCATION: Only take the single most relevant clause per class!
                         if exact_matches:
-                            display_desc = "; ".join(exact_matches)
+                            display_desc = exact_matches[0] 
                         elif partial_matches:
-                            display_desc = "; ".join(partial_matches)
+                            display_desc = partial_matches[0] 
                         else:
-                            display_desc = clean_desc 
+                            display_desc = clauses[0] if clauses else clean_desc 
                             
                         filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
                         
-                # Use double-newlines so Streamlit stacks them perfectly
+                # Use the visual separator so Streamlit displays it cleanly despite UI row limitations
                 return "\n | ".join(filtered) if filtered else "", score
 
             # Apply Logic
@@ -363,7 +364,7 @@ def run():
             ui_df['Filtered Goods'] = applied.apply(lambda x: x[0])
             ui_df['MatchScore'] = applied.apply(lambda x: x[1])
             
-            # Remove rows that had 0 matching classes (This eliminates the IC 018 glitch)
+            # Remove rows that had 0 matching classes
             ui_df = ui_df[ui_df['Filtered Goods'] != ""]
             
             # Sort by highest match score, then drop the hidden utility columns
