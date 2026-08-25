@@ -4,6 +4,10 @@ import re
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
+# ADD THIS LINE BACK IN:
+from utils import run_uspto_bridging_search 
+
+
 # --- KEEP YOUR EXISTING IMPORTS AT THE TOP ---
 # (e.g., from utils import run_uspto_bridging_search)
 
