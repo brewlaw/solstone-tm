@@ -1,6 +1,8 @@
-import streamlit as st
+import os
+import time
 import pandas as pd
-from playwright.sync_api import sync_playwright
+import streamlit as st
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
@@ -10,36 +12,46 @@ def format_class_input(class_input):
     if not class_input: return []
     return [c.strip().zfill(3) for c in class_input.split(",") if c.strip()]
 
+# ---------------------------------------------------------
+# SCRAPERS
+# ---------------------------------------------------------
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes the Mark Name and specific Class Goods from TSDR with stealth headers."""
+    """Scrapes TSDR with maximum stealth and takes a debug screenshot on failure."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process']
+            args=[
+                '--no-sandbox', 
+                '--disable-dev-shm-usage', 
+                '--disable-gpu', 
+                '--disable-blink-features=AutomationControlled'
+            ]
         )
-        
-        # Add a real User-Agent to bypass the USPTO Akamai bot-blocker
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            java_script_enabled=True
         )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
         
         try:
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000, wait_until="networkidle")
             
-            # Wait for the main Mark element to load instead of the specific Goods div
-            page.wait_for_selector("div.markElement", timeout=15000)
+            # Wait for either the mark element OR an Akamai block page
+            page.wait_for_selector("div.markElement, h1:has-text('Access Denied')", timeout=15000)
             
-            # Extract Mark Name
-            mark_name = page.locator("div.markElement").first.inner_text().strip()
+            if "Access Denied" in page.content() or "Request Rejected" in page.content():
+                page.screenshot(path=f"debug_{serial_number}.png")
+                browser.close()
+                return None, f"USPTO Firewall Blocked the Connection."
+
+            mark_name = page.locator("div.markElement").first.inner_text().strip() if page.locator("div.markElement").is_visible() else "Unknown Mark"
             
-            # Extract the full page text as a fallback to avoid strict HTML class errors
             full_text = page.locator("body").inner_text()
-            
-            # Slice out everything between "Goods and Services" and "Basis Information"
             if "Goods and Services" in full_text:
                 goods_raw = full_text.split("Goods and Services")[-1].split("Basis Information")[0]
                 goods_text = goods_raw.strip()
@@ -50,8 +62,109 @@ def fetch_tsdr_data(serial_number, target_classes):
             return mark_name, goods_text
             
         except Exception as e:
+            page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
+
+def run_uspto_bridging_search(search_query, max_results=10):
+    """Executes a tmsearch.uspto.gov search and downloads the Excel export."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
+        
+        try:
+            # Navigate and Search
+            page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=30000, wait_until="domcontentloaded")
+            time.sleep(2)
+
+            search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
+            try:
+                search_input.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                builder_toggle = page.locator("text='Field tag and Search builder'").last
+                if builder_toggle.is_visible():
+                    builder_toggle.click(force=True)
+                    time.sleep(1)
+                search_input = page.get_by_placeholder("Search using field tags")
+                search_input.wait_for(state="visible", timeout=10000)
+
+            search_input.fill(search_query)
+            page.keyboard.press("Enter")
+            time.sleep(4)
+
+            # Export to Excel
+            export_btn = page.locator("text='Export'").last
+            try:
+                export_btn.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                browser.close()
+                return pd.DataFrame() 
+
+            export_btn.click(force=True)
+            time.sleep(1)
+
+            with page.expect_download(timeout=45000) as download_info:
+                try:
+                    page.locator("text='First 500 results'").last.click(timeout=3000, force=True)
+                except PlaywrightTimeoutError:
+                    page.locator("text='First 10000 results'").last.click(force=True)
+
+            download = download_info.value
+            downloaded_file = download.path()
+
+            # Parse the downloaded Excel file
+            df = pd.read_excel(downloaded_file)
+
+            header_idx = None
+            for i, row in df.iterrows():
+                row_strs = [str(cell).lower() for cell in row]
+                if any('serialnumber' in s or 'wordmark' in s for s in row_strs):
+                    header_idx = i
+                    break
+            
+            if header_idx is not None:
+                df.columns = df.iloc[header_idx]
+                df = df.iloc[header_idx + 1:].reset_index(drop=True)
+
+            try:
+                os.remove(downloaded_file)
+            except:
+                pass
+
+            browser.close()
+
+            # Map Columns
+            cols = df.columns
+            sn_col = next((c for c in cols if 'serial' in str(c).lower()), None)
+            rn_col = next((c for c in cols if 'registrationnumber' in str(c).lower() or 'reg' in str(c).lower() and 'num' in str(c).lower()), None)
+            status_col = next((c for c in cols if 'status' in str(c).lower()), None)
+            mark_col = next((c for c in cols if 'wordmark' in str(c).lower() or 'mark' in str(c).lower()), None)
+            goods_col = next((c for c in cols if 'good' in str(c).lower() or 'service' in str(c).lower()), None)
+
+            clean_records = []
+            for _, row in df.head(max_results).iterrows():
+                clean_records.append({
+                    "Select": False,
+                    "Mark": str(row[mark_col]).strip() if mark_col and pd.notna(row[mark_col]) else "N/A",
+                    "Reg Num": str(row[rn_col]).strip() if rn_col and pd.notna(row[rn_col]) else "N/A",
+                    "Serial Num": str(row[sn_col]).strip() if sn_col and pd.notna(row[sn_col]) else "N/A",
+                    "Status": str(row[status_col]).strip() if status_col and pd.notna(row[status_col]) else "LIVE",
+                    "Goods": str(row[goods_col]).strip()[:200] + "..." if goods_col and pd.notna(row[goods_col]) else "N/A"
+                })
+
+            return pd.DataFrame(clean_records)
+
+        except Exception as e:
+            browser.close()
+            print(f"Error in USPTO Search: {e}")
+            return pd.DataFrame()
+
 
 # ---------------------------------------------------------
 # MAIN APP FLOW
@@ -60,7 +173,6 @@ def run():
     st.header("Letter of Protest Generator")
     st.write("Extract goods/services, run a bridging search, and generate a compliant Exhibit A PDF.")
     
-    # Initialize Session State Variables
     if 'lop_step' not in st.session_state:
         st.session_state['lop_step'] = 1
     if 'bridging_results' not in st.session_state:
@@ -83,7 +195,7 @@ def run():
         target_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", help="Comma separated")
         
     if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Scraping TSDR..."):
+        with st.spinner("Scraping TSDR with stealth mode..."):
             client_mark, client_goods = fetch_tsdr_data(client_sn.strip(), format_class_input(client_class))
             target_mark, target_goods = fetch_tsdr_data(target_sn.strip(), format_class_input(target_class))
             
@@ -95,7 +207,13 @@ def run():
             st.session_state['target_class_fmt'] = format_class_input(target_class)
             st.session_state['lop_step'] = 2
 
-    # Display Editable Text Areas
+            if os.path.exists(f"debug_{client_sn.strip()}.png"):
+                st.error("Client Fetch Failed. Here is what the bot saw:")
+                st.image(f"debug_{client_sn.strip()}.png")
+            if os.path.exists(f"debug_{target_sn.strip()}.png"):
+                st.error("Applicant Fetch Failed. Here is what the bot saw:")
+                st.image(f"debug_{target_sn.strip()}.png")
+
     if st.session_state['lop_step'] >= 2:
         st.info("Trim down the text below to isolate the exact goods/services you want to cross-reference.")
         
@@ -114,19 +232,23 @@ def run():
         st.divider()
         st.markdown("### Step 2: Bridging Search")
         if st.button("Execute Bridging Search"):
-            with st.spinner("Searching USPTO for Bridging Registrations..."):
-                # TODO: Connect to your actual USPTO Scraper here!
-                # For UI demonstration, generating dummy data:
-                dummy_data = [
-                    {"Select": False, "Mark": "MOUNTAIN BREW", "Reg Num": "5432109", "Status": "LIVE/REGISTRATION", "Goods": "Beer; Restaurant services"},
-                    {"Select": False, "Mark": "RIVER RUNNERS", "Reg Num": "6543210", "Status": "LIVE/REGISTRATION", "Goods": "Ale; Taproom services"},
-                    {"Select": False, "Mark": "VALLEY HOPS", "Reg Num": "7654321", "Status": "LIVE/REGISTRATION", "Goods": "Craft beer; Brewpub services"},
-                    {"Select": False, "Mark": "CITY TAPS", "Reg Num": "8765432", "Status": "LIVE/REGISTRATION", "Goods": "Lager; Bar services"},
-                    {"Select": False, "Mark": "ISLAND ALES", "Reg Num": "9876543", "Status": "LIVE/REGISTRATION", "Goods": "Porter; Providing of food and drink"},
-                    {"Select": False, "Mark": "DESERT STOUT", "Reg Num": "1098765", "Status": "LIVE/REGISTRATION", "Goods": "Stout; Tavern services"},
-                ]
-                st.session_state['bridging_results'] = pd.DataFrame(dummy_data)
-                st.session_state['lop_step'] = 3
+            with st.spinner("Searching USPTO via tmsearch.uspto.gov..."):
+                c_class = st.session_state.get('client_class_fmt', ["032"])[0] if st.session_state.get('client_class_fmt') else "032"
+                t_class = st.session_state.get('target_class_fmt', ["043"])[0] if st.session_state.get('target_class_fmt') else "043"
+                
+                c_kw = core_client.strip().replace('"', '')
+                t_kw = core_target.strip().replace('"', '')
+
+                search_query = f'GS:"{c_kw}" AND GS:"{t_kw}" AND (IC:{c_class} AND IC:{t_class}) AND LD:true AND RN > 0'
+                
+                results_df = run_uspto_bridging_search(search_query, max_results=10)
+                
+                if results_df.empty:
+                    st.warning(f"No bridging registrations found for query: `{search_query}`. Try broadening your keywords.")
+                else:
+                    st.session_state['bridging_results'] = results_df
+                    st.session_state['lop_step'] = 3
+                    st.rerun()
 
     # ==========================================
     # STEP 3: RESULTS & SELECTION
@@ -136,20 +258,17 @@ def run():
         st.markdown("### Step 3: Select Evidence (Max 5)")
         st.caption("Select up to 5 of the strongest bridging registrations. Evidence must be based on USE in commerce.")
         
-        # Interactive Data Editor with Checkboxes
         edited_df = st.data_editor(
             st.session_state['bridging_results'],
             column_config={"Select": st.column_config.CheckboxColumn("Select", help="Check to include in LoP", default=False)},
-            disabled=["Mark", "Reg Num", "Status", "Goods"],
+            disabled=["Mark", "Reg Num", "Serial Num", "Status", "Goods"],
             hide_index=True,
             use_container_width=True
         )
         
-        # Calculate Selected
         selected_rows = edited_df[edited_df["Select"] == True]
         selected_count = len(selected_rows)
         
-        # Real-time counter
         if selected_count > 5:
             st.error(f"⚠️ Selected: {selected_count}/5 - You have exceeded the USPTO maximum limit of 5 registrations.")
         else:
@@ -161,12 +280,7 @@ def run():
         if 0 < selected_count <= 5:
             st.divider()
             st.markdown("### Step 4: Preview & Export")
-            st.write("These registrations will be fetched from TSDR and compiled into Exhibit A:")
             st.dataframe(selected_rows[["Mark", "Reg Num", "Goods"]], hide_index=True, use_container_width=True)
             
             if st.button("📄 Generate Exhibit A (PDF)", type="primary"):
-                st.info(f"Initiating Playwright to download TSDR status pages for {selected_count} marks and compile Exhibit A...")
-                # TODO: Trigger TSDR PDF Generation, Merge, and Download Button here!
-
-if __name__ == "__main__":
-    run()
+                st.info(f"PDF generator coming next! Ready to compile {selected_count} marks.")
