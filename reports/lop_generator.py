@@ -284,18 +284,28 @@ def run():
         st.divider()
         st.markdown("### Step 2: Bridging Search")
         if st.button("Execute Bridging Search"):
-            with st.spinner("Searching USPTO via tmsearch.uspto.gov..."):
-                c_class = st.session_state.get('client_class_fmt', ["032"])[0] if st.session_state.get('client_class_fmt') else "032"
-                t_class = st.session_state.get('target_class_fmt', ["043"])[0] if st.session_state.get('target_class_fmt') else "043"
+            
+            # Pull directly from whatever the user typed in Step 1 (NO hardcoded fallbacks!)
+            raw_c = st.session_state.get('client_class', '')
+            raw_t = st.session_state.get('applicant_class', '')
+            
+            # Ensure they are 3 digits (turns "32" into "032" automatically)
+            c_class = str(raw_c).strip().zfill(3)
+            t_class = str(raw_t).strip().zfill(3)
+            
+            if c_class == "000" or t_class == "000" or not raw_c or not raw_t:
+                st.error("Please enter both the Client and Applicant classes in Step 1 before searching!")
+                st.stop()
                 
-                # Strip out any accidental quotes the user might have typed
+            with st.spinner("Searching USPTO via tmsearch.uspto.gov..."):
+                
+                # Strip out any accidental quotes the user might have typed in the keywords
                 c_kw = core_client.strip().replace('"', '')
                 t_kw = core_target.strip().replace('"', '')
 
-                # EXACT MATCH with the Live Document filter added
+                # Dynamic query using ONLY the user's inputs
                 search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class} AND LD:true'
                 
-                # Fetching extra results so you have a good list to pick from
                 results_df = run_uspto_bridging_search(search_query, max_results=20)
                 
                 if results_df.empty:
