@@ -21,7 +21,7 @@ import re  # Put this at the very top of your file with the other imports!
 import re
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by mimicking human typing and clicking Expand All."""
+    """Scrapes TSDR by targeting the exact HTML DOM elements for 'Mark:' and 'For:'."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -43,49 +43,37 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            # 1. Go to the TSDR home page
+            # 1. Go to the TSDR home page and search
             page.goto("https://tsdr.uspto.gov/", timeout=30000, wait_until="domcontentloaded")
-            
-            # 2. Type the serial number into the search box
             page.locator('#searchNumber').fill(serial_number)
-            
-            # 3. Click the "Status" button
             page.locator('#statusSearchButton').click()
             
-            # 4. Wait for the page to actually load the status data
-            page.wait_for_selector("text='Mark:'", timeout=15000)
+            # 2. Wait for the page structure to load by looking for the "Mark:" key
+            page.wait_for_selector("div.key:has-text('Mark:')", timeout=15000)
             
-            # 4.5. Click the "Expand All" button to reveal hidden accordion text!
-            try:
-                expand_btn = page.locator("text='Expand All'").first
-                expand_btn.wait_for(state="visible", timeout=3000)
-                expand_btn.click(force=True)
-            except:
-                pass # If it's already expanded or fails to click, keep going
-            
-            # Hard pause for 2 seconds to let the tables physically animate open
-            page.wait_for_timeout(2000)
-            
-            # Dump all the visible text on the page
-            full_text = page.locator("body").inner_text()
-            
-            if "Access Denied" in full_text or "Request Rejected" in full_text:
-                browser.close()
-                return None, f"USPTO Firewall Blocked the Connection."
+            # 3. Extract Mark Name using the exact HTML structure
+            mark_name = "Unknown Mark"
+            mark_locator = page.locator("div.row:has(div.key:has-text('Mark:')) > div.value").first
+            if mark_locator.count() > 0:
+                mark_name = mark_locator.text_content().strip()
 
-            # 5. Extract Mark Name using case-insensitive Regex
-            mark_name = "Design/Unknown Mark"
-            mark_match = re.search(r'(?i)(?:Word Mark|Mark):\s*([^\n]+)', full_text)
-            if mark_match:
-                mark_name = mark_match.group(1).strip()
-
-            # 6. Extract Goods and Services using bulletproof Regex
-            goods_match = re.search(r'(?i)Goods\s*(?:and|&)\s*Services(.*?)(?:Basis Information|Current Owner|Mark Information|Standard Character)', full_text, re.DOTALL)
+            # 4. Extract Goods and Services using the exact HTML "For:" key
+            goods_locators = page.locator("div.row:has(div.key:has-text('For:')) > div.value")
+            goods_count = goods_locators.count()
             
-            if goods_match:
-                goods_text = goods_match.group(1).strip()
+            if goods_count > 0:
+                goods_list = []
+                # Loop through all classes/goods listed and combine them
+                for i in range(goods_count):
+                    text = goods_locators.nth(i).text_content()
+                    if text:
+                        # Clean up tabs/newlines that USPTO sometimes hides in the HTML
+                        clean_text = " ".join(text.split()).strip()
+                        goods_list.append(clean_text)
+                
+                goods_text = "\n\n".join(goods_list)
             else:
-                goods_text = f"--- COULD NOT FIND BOUNDARIES. RAW TEXT DUMP BELOW ---\n\n{full_text}"
+                goods_text = "Could not find 'For:' tags in the HTML structure."
             
             browser.close()
             return mark_name, goods_text
