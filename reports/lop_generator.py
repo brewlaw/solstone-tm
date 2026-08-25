@@ -272,12 +272,11 @@ def run():
             if results_df.empty:
                 st.warning(f"No bridging registrations found for query: `{search_query}`. Try checking different keyword boxes.")
             else:
-                # --- NEW EXACT MATCH FILTER ---
-                def clean_goods_exact(text, c_cls, t_cls, c_kws, t_kws):
-                    if not isinstance(text, str): return text
+                # --- EXACT MATCH FILTER WITH SCORING ---
+                def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
+                    if not isinstance(text, str): return text, 0
                     segments = re.finditer(r'IC\s+0*(\d+)[\s:]+(.*?)(?=IC\s+\d+|$)', text, re.IGNORECASE | re.DOTALL)
                     
-                    # Map keywords to their respective classes
                     class_kws = {}
                     if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in c_kws]
                     if t_cls: 
@@ -285,13 +284,14 @@ def run():
                         class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in t_kws]
                         
                     filtered = []
+                    score = 0
+                    
                     for match in segments:
                         cls_num = match.group(1)
                         raw_desc = match.group(2).strip().rstrip(';')
                         
                         if cls_num in class_kws:
                             kws = class_kws[cls_num]
-                            # Split goods description by semicolon
                             clauses = [c.strip() for c in raw_desc.split(';')]
                             
                             exact_matches = []
@@ -300,46 +300,55 @@ def run():
                             for clause in clauses:
                                 c_lower = clause.lower().strip(".;, ")
                                 
-                                is_exact = False
+                                matched_exact = False
+                                matched_list = False
+                                
                                 for kw in kws:
-                                    # 1. Matches the entire clause exactly ("Beer")
                                     if c_lower == kw:
-                                        is_exact = True
+                                        matched_exact = True
                                         break
-                                    # 2. Matches exactly within a comma-separated list ("Ale, porter, beer")
                                     sub_items = [x.strip(".;, ") for x in c_lower.split(',')]
                                     if kw in sub_items:
-                                        is_exact = True
+                                        matched_list = True
                                         break
                                         
-                                if is_exact:
+                                if matched_exact:
                                     exact_matches.append(clause)
+                                    score += 100 # +100 for perfect standalone word
+                                elif matched_list:
+                                    exact_matches.append(clause)
+                                    score += 50  # +50 for exact match in a comma list
                                 else:
-                                    # Fallback: Whole word regex match just in case
                                     for kw in kws:
                                         if re.search(rf'\b{re.escape(kw)}\b', c_lower):
                                             partial_matches.append(clause)
+                                            score += 10 # +10 for partial regex match
                                             break
                                             
-                            # Determine best match to display
                             if exact_matches:
                                 display_desc = "; ".join(exact_matches)
                             elif partial_matches:
                                 display_desc = "; ".join(partial_matches)
                             else:
-                                display_desc = raw_desc # Failsafe
+                                display_desc = raw_desc
                                 
                             filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
                             
-                    # Join with a single newline so classes stack within the same cell
-                    return "\n".join(filtered) if filtered else text
+                    return "\n".join(filtered) if filtered else text, score
                 
                 col_name = "goods" if "goods" in results_df.columns else "Goods"
                 if col_name not in results_df.columns and "Goods & services" in results_df.columns:
                     col_name = "Goods & services"
                     
                 if col_name in results_df.columns:
-                    results_df[col_name] = results_df[col_name].apply(lambda x: clean_goods_exact(x, c_class, t_class, c_clean, t_clean))
+                    # Apply function and separate the formatted text and the score
+                    applied = results_df[col_name].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
+                    results_df[col_name] = applied.apply(lambda x: x[0] if isinstance(x, tuple) else x)
+                    results_df['MatchScore'] = applied.apply(lambda x: x[1] if isinstance(x, tuple) else 0)
+                    
+                    # Sort by highest score first to put standalone matches at the very top!
+                    results_df = results_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
+                    results_df = results_df.drop(columns=['MatchScore']) # Hide the score from the UI
 
                 st.session_state['bridging_results'] = results_df
                 st.session_state['lop_step'] = 3
