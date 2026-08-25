@@ -17,8 +17,9 @@ def format_class_input(class_input):
 # SCRAPERS
 # ---------------------------------------------------------
 
+
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by injecting custom Javascript for native DOM parsing."""
+    """Scrapes TSDR by dumping the entire Goods container and cleaning it in Python."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -44,19 +45,18 @@ def fetch_tsdr_data(serial_number, target_classes):
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000)
             
-            # 2. Hard pause for 5 seconds to let the USPTO Javascript render the accordion tables
+            # 2. Hard pause for 5 seconds to let the USPTO Javascript render the page
             page.wait_for_timeout(5000)
             
             if "Access Denied" in page.content():
                 browser.close()
                 return None, "USPTO Firewall Blocked the Connection."
 
-            # 3. Inject Javascript to natively scan the DOM structure
+            # 3. Inject basic Javascript just to find the container and grab ALL text inside it
             js_extract = """
             () => {
                 let markName = "Unknown Mark";
                 
-                // Find Mark Name
                 let keys = document.querySelectorAll('div.key');
                 for (let k of keys) {
                     let text = k.textContent.trim();
@@ -69,57 +69,42 @@ def fetch_tsdr_data(serial_number, target_classes):
                     }
                 }
 
-                let goods = [];
-                // Find the Goods and Services Section Header
+                let goodsText = "Could not find Goods & Services container. Please manually paste.";
                 let headers = document.querySelectorAll('div.expand-collapse');
                 let gsHeader = Array.from(headers).find(h => h.textContent.match(/Goods (and|&) Services/i));
                 
                 if (gsHeader) {
                     let container = gsHeader.nextElementSibling;
                     if (container && container.classList.contains('toggle_container')) {
-                        let rows = container.querySelectorAll('div.row');
-                        
-                        // Loop through all rows in the Goods & Services section
-                        for (let row of rows) {
-                            let key = row.querySelector('div.key');
-                            let val = row.querySelector('div.value');
-                            
-                            if (val) {
-                                let keyText = key ? key.textContent.trim() : "";
-                                // Capture the value if the key is "For:" OR if there is no key at all!
-                                if (keyText === "" || keyText === "For:") {
-                                    let cleanText = val.textContent.replace(/\\s+/g, ' ').trim();
-                                    if (cleanText) goods.push(cleanText);
-                                }
-                            }
-                        }
+                        // Extract all text, completely ignoring how the USPTO formats it
+                        goodsText = container.textContent;
                     }
                 }
                 
-                return { mark: markName, goods: goods };
+                return { mark: markName, goods: goodsText };
             }
             """
             
-            # Execute the Javascript and retrieve the clean dictionary
             result = page.evaluate(js_extract)
             mark_name = result.get('mark', 'Unknown Mark')
-            goods_list = result.get('goods', [])
+            raw_goods = result.get('goods', '')
             
-            if goods_list:
-                goods_text = "\n\n".join(goods_list)
-            else:
-                goods_text = "Could not parse goods. Please manually paste from TSDR."
+            # 4. Clean up the extracted text using Python
+            # Remove the massive generic amendment note the USPTO puts at the top
+            clean_goods = re.sub(r'(?i)Note:.*?identify additional \(new\) wording in the goods/services\.', '', raw_goods, flags=re.DOTALL)
             
-            # Clean up the debug image if it succeeds
-            import os
-            if os.path.exists(f"debug_{serial_number}.png"):
-                os.remove(f"debug_{serial_number}.png")
-                
+            # Remove the "For:" label if it exists just to make it cleaner
+            clean_goods = clean_goods.replace("For:", "")
+            
+            # Strip out excessive invisible tabs and blank lines
+            clean_goods = re.sub(r'\t+', '', clean_goods)
+            clean_goods = re.sub(r'\n{3,}', '\n\n', clean_goods)
+            goods_text = clean_goods.strip()
+            
             browser.close()
             return mark_name, goods_text
             
         except Exception as e:
-            page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
 
