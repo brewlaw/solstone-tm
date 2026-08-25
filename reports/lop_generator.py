@@ -18,7 +18,7 @@ def format_class_input(class_input):
 # ---------------------------------------------------------
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR using Direct URLs and precise HTML locators."""
+    """Scrapes TSDR by injecting custom Javascript for native DOM parsing."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -40,50 +40,75 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            # 1. Use the direct URL (we know this successfully bypasses the firewall from your earlier screenshot!)
+            # 1. Use the direct URL
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000)
             
             # 2. Hard pause for 5 seconds to let the USPTO Javascript render the accordion tables
             page.wait_for_timeout(5000)
             
-            # Check for firewall block just in case
             if "Access Denied" in page.content():
                 browser.close()
                 return None, "USPTO Firewall Blocked the Connection."
 
-            # 3. Extract Mark Name using the exact HTML structure
-            mark_name = "Unknown Mark"
-            try:
-                mark_locator = page.locator("div.row:has(div.key:has-text('Mark:')) > div.value").first
-                if mark_locator.count() > 0:
-                    mark_name = mark_locator.text_content().strip()
-                else:
-                    # Quick visual fallback for the Mark name
-                    import re
-                    full_text = page.locator("body").inner_text()
-                    mark_match = re.search(r'(?i)(?:Word Mark|Mark):\s*([^\n]+)', full_text)
-                    if mark_match:
-                        mark_name = mark_match.group(1).strip()
-            except:
-                pass
-
-            # 4. Extract Goods and Services using the exact HTML "For:" key you found!
-            goods_locators = page.locator("div.row:has(div.key:has-text('For:')) > div.value")
-            goods_count = goods_locators.count()
-            
-            if goods_count > 0:
-                goods_list = []
-                for i in range(goods_count):
-                    text = goods_locators.nth(i).text_content()
-                    if text:
-                        # Clean up tabs/newlines that USPTO hides in the HTML
-                        clean_text = " ".join(text.split()).strip()
-                        goods_list.append(clean_text)
+            # 3. Inject Javascript to natively scan the DOM structure
+            js_extract = """
+            () => {
+                let markName = "Unknown Mark";
                 
+                // Find Mark Name
+                let keys = document.querySelectorAll('div.key');
+                for (let k of keys) {
+                    let text = k.textContent.trim();
+                    if (text === 'Mark:' || text === 'Word Mark:') {
+                        let val = k.nextElementSibling;
+                        if (val && val.classList.contains('value')) {
+                            markName = val.textContent.trim();
+                            break;
+                        }
+                    }
+                }
+
+                let goods = [];
+                // Find the Goods and Services Section Header
+                let headers = document.querySelectorAll('div.expand-collapse');
+                let gsHeader = Array.from(headers).find(h => h.textContent.match(/Goods (and|&) Services/i));
+                
+                if (gsHeader) {
+                    let container = gsHeader.nextElementSibling;
+                    if (container && container.classList.contains('toggle_container')) {
+                        let rows = container.querySelectorAll('div.row');
+                        
+                        // Loop through all rows in the Goods & Services section
+                        for (let row of rows) {
+                            let key = row.querySelector('div.key');
+                            let val = row.querySelector('div.value');
+                            
+                            if (val) {
+                                let keyText = key ? key.textContent.trim() : "";
+                                // Capture the value if the key is "For:" OR if there is no key at all!
+                                if (keyText === "" || keyText === "For:") {
+                                    let cleanText = val.textContent.replace(/\\s+/g, ' ').trim();
+                                    if (cleanText) goods.push(cleanText);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                return { mark: markName, goods: goods };
+            }
+            """
+            
+            # Execute the Javascript and retrieve the clean dictionary
+            result = page.evaluate(js_extract)
+            mark_name = result.get('mark', 'Unknown Mark')
+            goods_list = result.get('goods', [])
+            
+            if goods_list:
                 goods_text = "\n\n".join(goods_list)
             else:
-                goods_text = "Could not find 'For:' tags. Please manually paste goods from TSDR."
+                goods_text = "Could not parse goods. Please manually paste from TSDR."
             
             # Clean up the debug image if it succeeds
             import os
