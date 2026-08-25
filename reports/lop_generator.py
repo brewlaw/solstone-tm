@@ -278,7 +278,7 @@ def run():
             st.markdown(f"**Mark:** {st.session_state.get('target_mark', '')}")
             core_target = st.text_area("Applicant Keywords", value=st.session_state.get('target_goods', ''), height=150)
             
-       # ==========================================
+      # ==========================================
         # STEP 2: BRIDGING SEARCH
         # ==========================================
         st.divider()
@@ -292,10 +292,10 @@ def run():
                 c_kw = core_client.strip().replace('"', '')
                 t_kw = core_target.strip().replace('"', '')
 
-                # EXACT MATCH to your screenshot: GS:"bartending services" AND GS:"beer" AND IC:032 AND IC:043
-                search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class}'
+                # EXACT MATCH with the Live Document filter added
+                search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class} AND LD:true'
                 
-                # Fetching a few extra results so you have a good list to pick Registered marks from
+                # Fetching extra results so you have a good list to pick from
                 results_df = run_uspto_bridging_search(search_query, max_results=20)
                 
                 if results_df.empty:
