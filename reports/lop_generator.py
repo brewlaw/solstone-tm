@@ -16,7 +16,7 @@ def format_class_input(class_input):
 # SCRAPERS
 # ---------------------------------------------------------
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR using text-based anchors instead of fragile HTML classes."""
+    """Scrapes TSDR using a hard pause instead of fragile selectors."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -39,21 +39,21 @@ def fetch_tsdr_data(serial_number, target_classes):
         
         try:
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+            
+            # 1. Wait until all background API calls stop
             page.goto(url, timeout=30000, wait_until="networkidle")
             
-            # Wait for the words "Goods and Services" to physically appear on the screen
-            page.wait_for_selector("text='Goods and Services', text='Access Denied', text='Request Rejected'", timeout=15000)
+            # 2. Hard pause for 3 seconds to let the page visually render
+            page.wait_for_timeout(3000)
             
-            if "Access Denied" in page.content() or "Request Rejected" in page.content():
+            # 3. Dump the text
+            full_text = page.locator("body").inner_text()
+            
+            if "Access Denied" in full_text or "Request Rejected" in full_text:
                 page.screenshot(path=f"debug_{serial_number}.png")
                 browser.close()
                 return None, f"USPTO Firewall Blocked the Connection."
 
-            # Give JS an extra second to finish rendering the tables
-            page.wait_for_timeout(1500)
-            
-            full_text = page.locator("body").inner_text()
-            
             # Extract Mark Name visually
             mark_name = "Design/Unknown Mark"
             if "Word Mark:" in full_text:
@@ -65,10 +65,13 @@ def fetch_tsdr_data(serial_number, target_classes):
             if "Goods and Services" in full_text:
                 goods_raw = full_text.split("Goods and Services")[-1].split("Basis Information")[0]
                 goods_text = goods_raw.strip()
+            elif "Goods & Services" in full_text:
+                goods_raw = full_text.split("Goods & Services")[-1].split("Basis Information")[0]
+                goods_text = goods_raw.strip()
             else:
-                goods_text = "Goods and Services section not found on page."
+                goods_text = "Goods block not found on page. Please manually copy/paste from TSDR."
             
-            # Clean up the debug image if it succeeds!
+            # Clean up the debug image if it succeeds
             import os
             if os.path.exists(f"debug_{serial_number}.png"):
                 os.remove(f"debug_{serial_number}.png")
@@ -77,7 +80,6 @@ def fetch_tsdr_data(serial_number, target_classes):
             return mark_name, goods_text
             
         except Exception as e:
-            # If it still fails, take a picture so we can see what happened
             page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
