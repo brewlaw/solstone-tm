@@ -11,7 +11,7 @@ def format_class_input(class_input):
     return [c.strip().zfill(3) for c in class_input.split(",") if c.strip()]
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes the Mark Name and specific Class Goods from TSDR."""
+    """Scrapes the Mark Name and specific Class Goods from TSDR with stealth headers."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -19,20 +19,36 @@ def fetch_tsdr_data(serial_number, target_classes):
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process']
         )
-        page = browser.new_page()
+        
+        # Add a real User-Agent to bypass the USPTO Akamai bot-blocker
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
         
         try:
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             page.goto(url, timeout=30000, wait_until="networkidle")
-            page.wait_for_selector("div.goodsServicesList", timeout=10000)
             
-            mark_name = page.locator("div.markElement").first.inner_text().strip() if page.locator("div.markElement").is_visible() else "Unknown Mark"
+            # Wait for the main Mark element to load instead of the specific Goods div
+            page.wait_for_selector("div.markElement", timeout=15000)
             
-            # For now, grabbing all goods text. We can refine this to target specific classes in a future update.
-            goods_text = page.locator("div.goodsServicesList").inner_text().strip() 
+            # Extract Mark Name
+            mark_name = page.locator("div.markElement").first.inner_text().strip()
+            
+            # Extract the full page text as a fallback to avoid strict HTML class errors
+            full_text = page.locator("body").inner_text()
+            
+            # Slice out everything between "Goods and Services" and "Basis Information"
+            if "Goods and Services" in full_text:
+                goods_raw = full_text.split("Goods and Services")[-1].split("Basis Information")[0]
+                goods_text = goods_raw.strip()
+            else:
+                goods_text = "Goods and Services section not found on page."
             
             browser.close()
             return mark_name, goods_text
+            
         except Exception as e:
             browser.close()
             return None, f"Error fetching data: {str(e)}"
