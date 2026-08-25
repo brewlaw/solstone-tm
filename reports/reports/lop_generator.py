@@ -151,3 +151,6 @@ def run():
             if st.button("📄 Generate Exhibit A (PDF)", type="primary"):
                 st.info(f"Initiating Playwright to download TSDR status pages for {selected_count} marks and compile Exhibit A...")
                 # TODO: Trigger TSDR PDF Generation, Merge, and Download Button here!
+
+if __name__ == "__main__":
+    run()
