@@ -2,6 +2,7 @@ import streamlit as st
 import time
 import re
 import gc
+import os
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -22,11 +23,9 @@ def parse_goods_to_df(raw_goods):
     cleaned_items = []
     for item in raw_items:
         clean_item = item.strip()
-        # Remove empty items
         if clean_item:
             cleaned_items.append(clean_item)
             
-    # Remove duplicates while preserving order
     seen = set()
     unique_items = [x for x in cleaned_items if not (x in seen or seen.add(x))]
     
@@ -43,7 +42,6 @@ def fetch_tsdr_data(serial_number, target_classes):
     if not serial_number: return None, None
         
     max_retries = 3
-    
     for attempt in range(max_retries):
         try:
             with sync_playwright() as p:
@@ -87,7 +85,6 @@ def fetch_tsdr_data(serial_number, target_classes):
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
-                    
                     let keys = document.querySelectorAll('div.key');
                     for (let k of keys) {
                         let text = k.textContent.trim();
@@ -99,12 +96,10 @@ def fetch_tsdr_data(serial_number, target_classes):
                             }
                         }
                     }
-                    
                     let rows = document.querySelectorAll('div.row');
                     for (let row of rows) {
                         let keyNode = row.querySelector('div.key');
                         let valNode = row.querySelector('div.value');
-                        
                         if (keyNode && valNode) {
                             if (keyNode.textContent.trim() === 'For:') {
                                 let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
@@ -114,7 +109,6 @@ def fetch_tsdr_data(serial_number, target_classes):
                             }
                         }
                     }
-                    
                     return { 
                         mark: markName, 
                         goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
@@ -149,7 +143,6 @@ def run():
 
     # --- STEP 1: EXTRACT & VERIFY ---
     st.markdown("### Step 1: Extract & Verify")
-
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("#### Client Details")
@@ -213,7 +206,6 @@ def run():
     st.divider()
     st.markdown("### Step 2: Bridging Search")
     if st.button("Execute Bridging Search"):
-        
         raw_c = st.session_state.get('client_class', '')
         raw_t = st.session_state.get('applicant_class', '')
         c_class = str(raw_c).strip().zfill(3)
@@ -229,7 +221,6 @@ def run():
             
         c_df = st.session_state['c_goods_df']
         a_df = st.session_state['a_goods_df']
-        
         c_selected = c_df[c_df['Select'] == True]['Keyword'].tolist()
         a_selected = a_df[a_df['Select'] == True]['Keyword'].tolist()
         
@@ -238,16 +229,14 @@ def run():
             st.stop()
             
         with st.spinner("Searching USPTO via tmsearch.uspto.gov..."):
-            
             c_clean = [kw.strip().replace('"', '') for kw in c_selected]
             t_clean = [kw.strip().replace('"', '') for kw in a_selected]
-            
             c_kw_str = " OR ".join([f'"{kw}"' for kw in c_clean])
             t_kw_str = " OR ".join([f'"{kw}"' for kw in t_clean])
 
             search_query = f'GS:({t_kw_str}) AND GS:({c_kw_str}) AND IC:{c_class} AND IC:{t_class} AND LD:true'
             
-            raw_results = []
+            excel_out = "temp_bridging_search.xlsx" 
             try:
                 with sync_playwright() as p:
                     browser = p.chromium.launch(
@@ -255,9 +244,8 @@ def run():
                         args=['--no-sandbox', '--disable-dev-shm-usage']
                     )
                     page = browser.new_page()
-                    excel_out = "temp_bridging_search.xlsx" 
-                    
-                    raw_results = scrape_uspto(
+                    # We run the scraper, but we will ignore its formatted output and steal the raw Excel file instead!
+                    _ = scrape_uspto(
                         page=page,
                         primary_query=search_query,
                         excel_filename=excel_out
@@ -267,92 +255,124 @@ def run():
                 st.error(f"Error scraping USPTO: {e}")
                 st.stop()
                 
-            results_df = pd.DataFrame(raw_results)
+            if not os.path.exists(excel_out):
+                st.warning(f"No bridging registrations found for query: `{search_query}`.")
+                st.stop()
+                
+            # Read the RAW Excel data so we don't lose the full goods list
+            raw_df = pd.read_excel(excel_out)
             
-            if results_df.empty:
-                st.warning(f"No bridging registrations found for query: `{search_query}`. Try checking different keyword boxes.")
-            else:
-                # --- EXACT MATCH FILTER WITH SCORING ---
-                def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
-                    if not isinstance(text, str): return text, 0
-                    segments = re.finditer(r'IC\s+0*(\d+)[\s:]+(.*?)(?=IC\s+\d+|$)', text, re.IGNORECASE | re.DOTALL)
+            # Map the dynamic column names
+            cols = raw_df.columns
+            sn_col = next((c for c in cols if 'serial' in str(c).lower()), None)
+            rn_col = next((c for c in cols if 'registrationnumber' in str(c).lower() or 'reg' in str(c).lower() and 'num' in str(c).lower()), None)
+            mark_col = next((c for c in cols if 'wordmark' in str(c).lower() or 'mark' in str(c).lower()), None)
+            owner_col = next((c for c in cols if 'owner' in str(c).lower() or 'applicant' in str(c).lower()), None)
+            goods_col = next((c for c in cols if 'good' in str(c).lower() or 'service' in str(c).lower()), None)
+            status_col = next((c for c in cols if 'status' in str(c).lower()), None)
+            
+            # STRICT FILTER: Only keep Registered Marks
+            if rn_col:
+                raw_df = raw_df[raw_df[rn_col].notna()]
+                raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != '']
+                raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != 'nan']
+                raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != 'N/A']
+            
+            if raw_df.empty:
+                st.warning("No REGISTERED marks found. Try broadening your keywords.")
+                st.stop()
+                
+            # Build the clean UI DataFrame
+            ui_df = pd.DataFrame()
+            ui_df['Serial'] = raw_df[sn_col].astype(str).str.replace(r'\.0$', '', regex=True)
+            ui_df['Reg Number'] = raw_df[rn_col].astype(str).str.replace(r'\.0$', '', regex=True)
+            ui_df['Mark'] = raw_df[mark_col].astype(str)
+            ui_df['Owner'] = raw_df[owner_col].astype(str)
+            ui_df['Status'] = raw_df[status_col].astype(str) if status_col else "Live"
+            ui_df['Raw Goods'] = raw_df[goods_col].astype(str)
+            
+            # EXACT MATCH FILTER & SCORING ALGORITHM
+            def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
+                if not isinstance(text, str): return "", 0
+                segments = re.finditer(r'IC\s*0*(\d+)[\s.:]+(.*?)(?=IC\s*\d+|$)', text, re.IGNORECASE | re.DOTALL)
+                
+                class_kws = {}
+                if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in c_kws]
+                if t_cls: 
+                    t_str = t_cls.lstrip('0')
+                    class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in t_kws]
                     
-                    class_kws = {}
-                    if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in c_kws]
-                    if t_cls: 
-                        t_str = t_cls.lstrip('0')
-                        class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in t_kws]
-                        
-                    filtered = []
-                    score = 0
+                filtered = []
+                score = 0
+                
+                for match in segments:
+                    cls_num = match.group(1)
+                    raw_desc = match.group(2).strip().rstrip(';')
                     
-                    for match in segments:
-                        cls_num = match.group(1)
-                        raw_desc = match.group(2).strip().rstrip(';')
+                    # ENFORCE STRICT CLASS MATCHING (Ignores IC 018, 025, etc.)
+                    if cls_num in class_kws:
+                        kws = class_kws[cls_num]
+                        clean_desc = re.sub(r'(?i)US\s*[\d\s,]+[.:]\s*', '', raw_desc)
+                        clean_desc = re.sub(r'(?i)G\s*&\s*S\s*[:.]\s*', '', clean_desc)
+                        clauses = [c.strip() for c in clean_desc.split(';')]
                         
-                        if cls_num in class_kws:
-                            kws = class_kws[cls_num]
-                            clauses = [c.strip() for c in raw_desc.split(';')]
+                        exact_matches = []
+                        partial_matches = []
+                        
+                        for clause in clauses:
+                            c_lower = clause.lower().strip(".;, ")
+                            matched_exact = False
+                            matched_list = False
                             
-                            exact_matches = []
-                            partial_matches = []
-                            
-                            for clause in clauses:
-                                c_lower = clause.lower().strip(".;, ")
-                                
-                                matched_exact = False
-                                matched_list = False
-                                
+                            for kw in kws:
+                                if c_lower == kw:
+                                    matched_exact = True
+                                    break
+                                sub_items = [x.strip(".;, ") for x in c_lower.split(',')]
+                                if kw in sub_items:
+                                    matched_list = True
+                                    break
+                                    
+                            if matched_exact:
+                                exact_matches.append(clause)
+                                score += 100 
+                            elif matched_list:
+                                exact_matches.append(clause)
+                                score += 50  
+                            else:
                                 for kw in kws:
-                                    if c_lower == kw:
-                                        matched_exact = True
-                                        break
-                                    sub_items = [x.strip(".;, ") for x in c_lower.split(',')]
-                                    if kw in sub_items:
-                                        matched_list = True
+                                    if re.search(rf'\b{re.escape(kw)}\b', c_lower):
+                                        partial_matches.append(clause)
+                                        score += 10 
                                         break
                                         
-                                if matched_exact:
-                                    exact_matches.append(clause)
-                                    score += 100 # +100 for perfect standalone word
-                                elif matched_list:
-                                    exact_matches.append(clause)
-                                    score += 50  # +50 for exact match in a comma list
-                                else:
-                                    for kw in kws:
-                                        if re.search(rf'\b{re.escape(kw)}\b', c_lower):
-                                            partial_matches.append(clause)
-                                            score += 10 # +10 for partial regex match
-                                            break
-                                            
-                            if exact_matches:
-                                display_desc = "; ".join(exact_matches)
-                            elif partial_matches:
-                                display_desc = "; ".join(partial_matches)
-                            else:
-                                display_desc = raw_desc
-                                
-                            filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
+                        if exact_matches:
+                            display_desc = "; ".join(exact_matches)
+                        elif partial_matches:
+                            display_desc = "; ".join(partial_matches)
+                        else:
+                            display_desc = clean_desc 
                             
-                    return "\n".join(filtered) if filtered else text, score
-                
-                col_name = "goods" if "goods" in results_df.columns else "Goods"
-                if col_name not in results_df.columns and "Goods & services" in results_df.columns:
-                    col_name = "Goods & services"
-                    
-                if col_name in results_df.columns:
-                    # Apply function and separate the formatted text and the score
-                    applied = results_df[col_name].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
-                    results_df[col_name] = applied.apply(lambda x: x[0] if isinstance(x, tuple) else x)
-                    results_df['MatchScore'] = applied.apply(lambda x: x[1] if isinstance(x, tuple) else 0)
-                    
-                    # Sort by highest score first to put standalone matches at the very top!
-                    results_df = results_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
-                    results_df = results_df.drop(columns=['MatchScore']) # Hide the score from the UI
+                        filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
+                        
+                # Use double-newlines so Streamlit stacks them perfectly
+                return "\n\n".join(filtered) if filtered else "", score
 
-                st.session_state['bridging_results'] = results_df
-                st.session_state['lop_step'] = 3
-                st.rerun()
+            # Apply Logic
+            applied = ui_df['Raw Goods'].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
+            ui_df['Filtered Goods'] = applied.apply(lambda x: x[0])
+            ui_df['MatchScore'] = applied.apply(lambda x: x[1])
+            
+            # Remove rows that had 0 matching classes (This eliminates the IC 018 glitch)
+            ui_df = ui_df[ui_df['Filtered Goods'] != ""]
+            
+            # Sort by highest match score, then drop the hidden utility columns
+            ui_df = ui_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
+            ui_df = ui_df.drop(columns=['Raw Goods', 'MatchScore'])
+            
+            st.session_state['bridging_results'] = ui_df
+            st.session_state['lop_step'] = 3
+            st.rerun()
 
     # --- STEP 3: RESULTS TABLE ---
     if st.session_state.get('lop_step') == 3:
@@ -361,18 +381,16 @@ def run():
         st.write("Select the best records below to include in your Exhibit A.")
         
         df = st.session_state['bridging_results']
-        
         if "Select" not in df.columns:
             df.insert(0, "Select", False)
         
+        # Configure the TextColumn to explicitly allow multiline text wrapping
         edited_df = st.data_editor(
             df,
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", help="Check to include in LOP"),
-                "goods": st.column_config.TextColumn("Filtered Goods", width="large"),
-                "Goods": st.column_config.TextColumn("Filtered Goods", width="large"),
-                "Goods & services": st.column_config.TextColumn("Filtered Goods", width="large")
+                "Filtered Goods": st.column_config.TextColumn("Filtered Goods", width="large")
             }
         )
