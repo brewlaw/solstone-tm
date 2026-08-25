@@ -18,7 +18,7 @@ def format_class_input(class_input):
 # ---------------------------------------------------------
 
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by mimicking human typing and targeting exact HTML tags."""
+    """Scrapes TSDR using Direct URLs and precise HTML locators."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -40,27 +40,35 @@ def fetch_tsdr_data(serial_number, target_classes):
         page = context.new_page()
         
         try:
-            # 1. Go to the TSDR home page
-            page.goto("https://tsdr.uspto.gov/", timeout=30000, wait_until="networkidle")
+            # 1. Use the direct URL (we know this successfully bypasses the firewall from your earlier screenshot!)
+            url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+            page.goto(url, timeout=30000)
             
-            # 2. Type the serial number into the search box
-            search_box = page.locator('#searchNumber')
-            search_box.wait_for(state="visible", timeout=10000)
-            search_box.fill(serial_number)
+            # 2. Hard pause for 5 seconds to let the USPTO Javascript render the accordion tables
+            page.wait_for_timeout(5000)
             
-            # 3. Hit the "Enter" key on the keyboard to submit the search
-            search_box.press("Enter")
-            
-            # 4. Wait for the page structure to load by looking for the "Mark:" key
-            page.wait_for_selector("div.key:has-text('Mark:')", timeout=15000)
-            
-            # 5. Extract Mark Name using the exact HTML structure
-            mark_name = "Unknown Mark"
-            mark_locator = page.locator("div.row:has(div.key:has-text('Mark:')) > div.value").first
-            if mark_locator.count() > 0:
-                mark_name = mark_locator.text_content().strip()
+            # Check for firewall block just in case
+            if "Access Denied" in page.content():
+                browser.close()
+                return None, "USPTO Firewall Blocked the Connection."
 
-            # 6. Extract Goods and Services using the exact HTML "For:" key
+            # 3. Extract Mark Name using the exact HTML structure
+            mark_name = "Unknown Mark"
+            try:
+                mark_locator = page.locator("div.row:has(div.key:has-text('Mark:')) > div.value").first
+                if mark_locator.count() > 0:
+                    mark_name = mark_locator.text_content().strip()
+                else:
+                    # Quick visual fallback for the Mark name
+                    import re
+                    full_text = page.locator("body").inner_text()
+                    mark_match = re.search(r'(?i)(?:Word Mark|Mark):\s*([^\n]+)', full_text)
+                    if mark_match:
+                        mark_name = mark_match.group(1).strip()
+            except:
+                pass
+
+            # 4. Extract Goods and Services using the exact HTML "For:" key you found!
             goods_locators = page.locator("div.row:has(div.key:has-text('For:')) > div.value")
             goods_count = goods_locators.count()
             
@@ -69,19 +77,23 @@ def fetch_tsdr_data(serial_number, target_classes):
                 for i in range(goods_count):
                     text = goods_locators.nth(i).text_content()
                     if text:
-                        # Clean up tabs/newlines that USPTO sometimes hides in the HTML
+                        # Clean up tabs/newlines that USPTO hides in the HTML
                         clean_text = " ".join(text.split()).strip()
                         goods_list.append(clean_text)
                 
                 goods_text = "\n\n".join(goods_list)
             else:
-                goods_text = "Could not find 'For:' tags in the HTML structure."
+                goods_text = "Could not find 'For:' tags. Please manually paste goods from TSDR."
             
+            # Clean up the debug image if it succeeds
+            import os
+            if os.path.exists(f"debug_{serial_number}.png"):
+                os.remove(f"debug_{serial_number}.png")
+                
             browser.close()
             return mark_name, goods_text
             
         except Exception as e:
-            # Fallback to take a picture so we can see what went wrong
             page.screenshot(path=f"debug_{serial_number}.png")
             browser.close()
             return None, f"Error fetching data: {str(e)}"
