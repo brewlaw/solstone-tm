@@ -1,3 +1,4 @@
+import re
 import os
 import time
 import pandas as pd
@@ -15,8 +16,10 @@ def format_class_input(class_input):
 # ---------------------------------------------------------
 # SCRAPERS
 # ---------------------------------------------------------
+import re  # Put this at the very top of your file with the other imports!
+
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR using a hard pause instead of fragile selectors."""
+    """Scrapes TSDR using bulletproof Regex and a raw text fallback."""
     if not serial_number: return None, None
         
     with sync_playwright() as p:
@@ -40,36 +43,42 @@ def fetch_tsdr_data(serial_number, target_classes):
         try:
             url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
             
-            # 1. Wait until all background API calls stop
+            # Wait until all background API calls stop
             page.goto(url, timeout=30000, wait_until="networkidle")
             
-            # 2. Hard pause for 3 seconds to let the page visually render
+            # Hard pause for 3 seconds to let the page visually render
             page.wait_for_timeout(3000)
             
-            # 3. Dump the text
+            # Dump all the visible text on the page
             full_text = page.locator("body").inner_text()
             
             if "Access Denied" in full_text or "Request Rejected" in full_text:
-                page.screenshot(path=f"debug_{serial_number}.png")
                 browser.close()
                 return None, f"USPTO Firewall Blocked the Connection."
 
-            # Extract Mark Name visually
+            # 1. Extract Mark Name using case-insensitive Regex
             mark_name = "Design/Unknown Mark"
-            if "Word Mark:" in full_text:
-                mark_name = full_text.split("Word Mark:")[1].split('\n')[0].strip()
-            elif "Mark:" in full_text:
-                mark_name = full_text.split("Mark:")[1].split('\n')[0].strip()
+            mark_match = re.search(r'(?i)(?:Word Mark|Mark):\s*([^\n]+)', full_text)
+            if mark_match:
+                mark_name = mark_match.group(1).strip()
 
-            # Extract Goods by slicing the page text visually
-            if "Goods and Services" in full_text:
-                goods_raw = full_text.split("Goods and Services")[-1].split("Basis Information")[0]
-                goods_text = goods_raw.strip()
-            elif "Goods & Services" in full_text:
-                goods_raw = full_text.split("Goods & Services")[-1].split("Basis Information")[0]
-                goods_text = goods_raw.strip()
+            # 2. Extract Goods and Services using bulletproof Regex
+            # This looks for "Goods and Services" or "Goods & Services" and grabs everything 
+            # until the next major section header, regardless of capitalization.
+            goods_match = re.search(r'(?i)Goods\s*(?:and|&)\s*Services(.*?)(?:Basis Information|Current Owner|Mark Information|Standard Character)', full_text, re.DOTALL)
+            
+            if goods_match:
+                goods_text = goods_match.group(1).strip()
             else:
-                goods_text = "Goods block not found on page. Please manually copy/paste from TSDR."
+                # FALLBACK: If it STILL can't find the exact bounds, it will dump the raw text so you can manually trim it!
+                goods_text = f"--- COULD NOT FIND BOUNDARIES. RAW TEXT DUMP BELOW ---\n\n{full_text}"
+            
+            browser.close()
+            return mark_name, goods_text
+            
+        except Exception as e:
+            browser.close()
+            return None, f"Error fetching data: {str(e)}"
             
             # Clean up the debug image if it succeeds
             import os
