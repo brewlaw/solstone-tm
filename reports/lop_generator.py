@@ -63,84 +63,108 @@ def parse_goods_to_df(raw_goods):
 
 
 # ==========================================
-# 3. TMSearch INITIAL DATA SCRAPER (EXCEL EXPORT)
+# 3. TMSearch INITIAL DATA SCRAPER (FRONT DOOR WEB UI)
 # ==========================================
 def fetch_initial_data(serial_number):
-    """Uses tmsearch.uspto.gov via uspto_scraper to fetch the full Mark and Goods data."""
-    if not serial_number: 
-        return None, None
+    """Scrapes tmsearch.uspto.gov details by navigating through the search box to build the session."""
+    if not serial_number: return None, None
         
-    excel_out = f"temp_step1_{serial_number}.xlsx"
-    
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-            )
-            page = browser.new_page()
-            
-            # Use SN: for serial numbers (8 digits) and RN: for registration numbers (7 digits)
-            num_str = str(serial_number).strip()
-            query_prefix = "RN:" if len(num_str) == 7 else "SN:"
-            search_query = f"{query_prefix}{num_str}"
-            
-            # Rely on your rock-solid uspto_scraper to handle the session, search, and download!
-            _ = scrape_uspto(
-                page=page, 
-                primary_query=search_query, 
-                excel_filename=excel_out
-            )
-            browser.close()
-            
-        # Extract the full, unabridged data directly from the raw Excel file saved by scrape_uspto
-        if os.path.exists(excel_out):
-            df = pd.read_excel(excel_out)
-            
-            if not df.empty:
-                cols = df.columns
-                mark_col = next((c for c in cols if 'wordmark' in str(c).lower() or 'mark' in str(c).lower()), None)
-                goods_col = next((c for c in cols if 'good' in str(c).lower() or 'service' in str(c).lower()), None)
-                image_col = next((c for c in cols if 'image' in str(c).lower()), None)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-dev-shm-usage']
+                )
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    viewport={"width": 1920, "height": 1080},
+                    java_script_enabled=True
+                )
+                page = context.new_page()
                 
-                # Get Mark Name
-                mark_name = str(df.iloc[0][mark_col]).strip() if mark_col else "Unknown Mark"
+                num_str = str(serial_number).strip()
                 
-                # Fallback for Design Marks without words
-                if mark_name in ["nan", "N/A", "None", ""]:
-                    img_val = str(df.iloc[0][image_col]).strip() if image_col else ""
-                    mark_name = f"[{img_val}]" if img_val and img_val not in ["nan", "N/A", ""] else "[Design Mark / Unlabeled]"
-                    
-                # Get Full Goods Text
-                raw_goods = str(df.iloc[0][goods_col]).strip() if goods_col else ""
+                # FORCE NATURAL NAVIGATION: Go to the homepage to get the session token
+                page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=30000)
+                page.wait_for_timeout(2000)
                 
-                if raw_goods in ["nan", "N/A", "None", ""]:
-                    goods_text = "Goods boundaries not found. Please check manual entry."
-                else:
-                    # CLEANUP: The Excel file contains the full list. We just need to strip the "IC 032:" prefixes!
-                    cleaned_clauses = []
-                    # Split by semicolon (the standard Excel delimiter for goods)
-                    for clause in raw_goods.split(';'):
-                        clean_clause = clause.strip()
-                        # Regex to remove "IC 032:" or "IC 043." etc.
-                        clean_clause = re.sub(r'(?i)^IC\s*\d{1,3}\s*[:.]\s*', '', clean_clause)
-                        if clean_clause:
-                            cleaned_clauses.append(clean_clause)
-                            
-                    goods_text = "; ".join(cleaned_clauses)
-                
-                # Clean up the temp file
+                search_input = page.locator('input[aria-label="Search field"], input[placeholder*="Search"]').first
                 try:
-                    os.remove(excel_out)
+                    search_input.wait_for(state="visible", timeout=5000)
                 except:
-                    pass
+                    builder = page.locator("text='Field tag and Search builder'").last
+                    if builder.is_visible(): builder.click(force=True)
+                    search_input = page.get_by_placeholder("Search using field tags").first
                     
-                return mark_name, goods_text
+                query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
+                search_input.fill(query)
+                page.keyboard.press("Enter")
                 
-        return "Error", "Could not find registration data in TMSearch."
-            
-    except Exception as e:
-        return "Error", f"Failed to fetch data from TMSearch: {str(e)}"
+                # Wait for results and click the first hyperlink
+                page.wait_for_selector("a[href*='/search-results/']", timeout=15000)
+                page.locator("a[href*='/search-results/']").first.click()
+
+                # THE BULLETPROOF WAIT: Wait for the exact Goods ID shown in your screenshot
+                page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
+                
+                # Execute Javascript to scrape the DOM elements based on the screenshots
+                js_extract = """
+                () => {
+                    let markName = "Unknown Mark";
+                    let goodsArray = [];
+                    
+                    // 1. Mark Extraction 
+                    let labels = Array.from(document.querySelectorAll('div, span, p, h2, h3, h4, label'));
+                    let wmLabel = labels.find(el => el.textContent.trim() === 'Wordmark' || el.textContent.trim() === 'Mark');
+                    if (wmLabel && wmLabel.nextElementSibling) {
+                        markName = wmLabel.nextElementSibling.textContent.trim();
+                    }
+                    
+                    // 2. Goods Extraction (With Prefix/Date Cleanup included!)
+                    let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
+                    if (goodsBox) {
+                        let pTags = goodsBox.querySelectorAll('p.mb-1, p.mb-2, p');
+                        if (pTags.length > 0) {
+                            pTags.forEach(p => {
+                                let text = p.textContent.trim().replace(/\\s+/g, ' ');
+                                // Strip the "IC 032:" prefix
+                                text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
+                                // Chop off the First Use dates (everything after the | symbol)
+                                text = text.split('|')[0].trim();
+                                if (text) goodsArray.push(text);
+                            });
+                        } else {
+                            // Fallback
+                            let text = goodsBox.textContent.trim().replace(/\\s+/g, ' ');
+                            text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
+                            text = text.split('|')[0].trim();
+                            goodsArray.push(text);
+                        }
+                    }
+                    
+                    return {
+                        mark: markName,
+                        goods: goodsArray.length > 0 ? goodsArray.join("; ") : "Goods boundaries not found."
+                    };
+                }
+                """
+                
+                result = page.evaluate(js_extract)
+                browser.close()
+                
+                if result['mark'] == "Unknown Mark" and "Goods boundaries not found" in result['goods']:
+                    raise Exception("Data not found on the page.")
+                    
+                return result['mark'], result['goods']
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            else:
+                return "Error", f"Error fetching data from TMSearch: {str(e)}"
 
 # ==========================================
 # 4. HELPER: CLEAN & SCORE RESULTS (TIERED)
