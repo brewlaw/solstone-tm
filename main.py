@@ -8,7 +8,7 @@ from utils.saved_searches import get_saved_searches, delete_saved_search
 st.set_page_config(page_title="Solstone IP Suite", layout="wide", page_icon="⚖️")
 
 if os.path.exists("logo.jpg"):
-    st.sidebar.image("logo.jpg", width="stretch"width="stretch")
+    st.sidebar.image("logo.jpg", width="stretch")
 
 st.sidebar.title("Solstone IP Tools")
 st.sidebar.caption("Brew Law IP Suite")
