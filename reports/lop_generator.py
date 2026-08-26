@@ -40,10 +40,10 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. TSDR COMBINED SCRAPER (SINGLE BROWSER)
+# 2. TSDR COMBINED SCRAPER (SINGLE BROWSER, DUAL TABS)
 # ==========================================
 def fetch_both_tsdr_data(client_sn, app_sn):
-    """Fetches Client AND Applicant TSDR data inside a single browser tab using human search box navigation."""
+    """Fetches Client AND Applicant TSDR data inside a single browser using separate tabs to avoid DOM conflicts."""
     results = {
         "client": ("Unknown Mark", "Goods boundaries not found. Please manually copy from TSDR."),
         "applicant": ("Unknown Mark", "Goods boundaries not found. Please manually copy from TSDR.")
@@ -59,13 +59,13 @@ def fetch_both_tsdr_data(client_sn, app_sn):
                 '--disable-blink-features=AutomationControlled'
             ]
         )
+        # Establish ONE trusted session context
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
             java_script_enabled=True
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page = context.new_page()
         
         js_extract = """
         () => {
@@ -106,41 +106,49 @@ def fetch_both_tsdr_data(client_sn, app_sn):
         }
         """
 
-        # --- STEP A: FETCH CLIENT DATA ---
+        # --- STEP A: FETCH CLIENT DATA (TAB 1) ---
         if client_sn:
             try:
+                page1 = context.new_page()
                 url = f"https://tsdr.uspto.gov/#caseNumber={client_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                page.goto(url, timeout=30000)
-                page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                page.wait_for_timeout(1500)
-                res = page.evaluate(js_extract)
+                page1.goto(url, timeout=30000)
+                
+                try:
+                    page1.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                except:
+                    # Fallback human navigation
+                    page1.locator('#searchNumber').fill(str(client_sn))
+                    page1.locator('#searchNumber').press("Enter")
+                    page1.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                    
+                page1.wait_for_timeout(2000)
+                res = page1.evaluate(js_extract)
                 results["client"] = (res.get('mark'), res.get('goods'))
+                page1.close() # Close tab to free memory
             except Exception as e:
                 results["client"] = (None, f"Error fetching client: {str(e)}")
 
-        # --- STEP B: FETCH APPLICANT DATA (RE-USING SAME BROWSER & TAB) ---
+        time.sleep(1) # Brief human pause so we don't hit the server at the exact same millisecond
+
+        # --- STEP B: FETCH APPLICANT DATA (TAB 2) ---
         if app_sn:
             try:
-                # If page is already open, use search box like a human
-                if "tsdr.uspto.gov" in page.url:
-                    search_box = page.locator('#searchNumber')
-                    search_box.fill('')
-                    search_box.fill(str(app_sn))
-                    search_box.press("Enter")
+                page2 = context.new_page()
+                url = f"https://tsdr.uspto.gov/#caseNumber={app_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+                page2.goto(url, timeout=30000)
+                
+                try:
+                    page2.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                except:
+                    # Fallback human navigation
+                    page2.locator('#searchNumber').fill(str(app_sn))
+                    page2.locator('#searchNumber').press("Enter")
+                    page2.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
                     
-                    # Wait for TSDR to render new record
-                    page.wait_for_timeout(3000)
-                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                    res = page.evaluate(js_extract)
-                    results["applicant"] = (res.get('mark'), res.get('goods'))
-                else:
-                    # Direct load fallback if client was empty
-                    url = f"https://tsdr.uspto.gov/#caseNumber={app_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                    page.goto(url, timeout=30000)
-                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                    page.wait_for_timeout(1500)
-                    res = page.evaluate(js_extract)
-                    results["applicant"] = (res.get('mark'), res.get('goods'))
+                page2.wait_for_timeout(2000)
+                res = page2.evaluate(js_extract)
+                results["applicant"] = (res.get('mark'), res.get('goods'))
+                page2.close() # Close tab
             except Exception as e:
                 results["applicant"] = (None, f"Error fetching applicant: {str(e)}")
 
