@@ -4,7 +4,6 @@ import re
 import gc
 import os
 import pandas as pd
-import requests
 from playwright.sync_api import sync_playwright
 
 # Import your actual USPTO scraper
@@ -41,79 +40,105 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. TSDR SCRAPER FUNCTION (USPTO API)
+# 2. TSDR SCRAPER FUNCTION (PLAYWRIGHT "DOUBLE-TAP")
 # ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
-    """Fetches TSDR data instantly and reliably using the official USPTO API."""
+    """Scrapes TSDR by actively waiting for text to render, then natively targeting the DOM."""
     if not serial_number: return None, None
     
-    # Format the number and determine if it's a Serial (8 digits) or Reg Number (7 digits)
-    num_str = str(serial_number).strip().upper()
-    num_str = ''.join(filter(str.isalnum, num_str))
-    identifier_type = "rn" if len(num_str) == 7 else "sn"
-    
-    # Official TSDR API Endpoint
-    url = f"https://tsdrapi.uspto.gov/ts/cd/casestatus/{identifier_type}{num_str}/info.json"
-    
-    try:
-        # Retrieve the API key securely from Streamlit Secrets
-        api_key = st.secrets["USPTO_API_KEY"]
-    except KeyError:
-        return None, "Error: USPTO_API_KEY not found in Streamlit Secrets."
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled'
+            ]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            java_script_enabled=True
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page = context.new_page()
         
-    headers = {
-        "uspto-api-key": api_key,
-        "Accept": "application/json"
-    }
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        
-        # Handle specific USPTO server responses
-        if response.status_code in [401, 403]:
-            return None, "Error: USPTO API Key is invalid or unauthorized."
-        elif response.status_code == 404:
-            return None, "Error: Serial/Registration number not found in TSDR."
-        elif response.status_code != 200:
-            return None, f"USPTO API Error: {response.status_code}"
+        try:
+            # 1. Direct URL navigation
+            url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+            page.goto(url, timeout=30000)
             
-        data = response.json()
-        
-        # Navigate the JSON payload safely
-        trademarks = data.get("trademarks", [])
-        if not trademarks:
-            return None, "Error: No trademark data found in API response."
+            # 2. BULLETPROOF WAIT: Do not move forward until the word "Mark:" physically renders on the page.
+            try:
+                page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+            except:
+                # If the URL failed to auto-search, act like a human: type it in and hit enter.
+                try:
+                    page.locator('#searchNumber').fill(serial_number)
+                    page.locator('#searchNumber').press("Enter")
+                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                except:
+                    pass # Let it try to extract anyway
             
-        tm_info = trademarks[0]
-        status_info = tm_info.get("status", {})
-        
-        # 1. Extract Mark Name
-        mark_name = status_info.get("markElement", "Unknown Mark")
-        if not mark_name or mark_name == "Unknown Mark":
-            mark_name = "[Design Mark / Unlabeled]"
+            # Quick 2-second buffer to let the rest of the tables finish popping in
+            page.wait_for_timeout(2000)
             
-        # 2. Extract Goods and Services natively
-        goods_list = []
-        gs_array = tm_info.get("gsList", [])
-        
-        for item in gs_array:
-            description = item.get("goodsAndServicesDescriptionText") or item.get("goodsAndServicesDescription") or ""
-            if description:
-                # Clean up tabs/spacing
-                clean_desc = " ".join(description.split())
-                goods_list.append(clean_desc)
+            if "Access Denied" in page.content():
+                browser.close()
+                return None, "USPTO Firewall Blocked the Connection."
+            
+            # 3. Inject JS to parse the rows exactly as shown in your inspector screenshots
+            js_extract = """
+            () => {
+                let markName = "Unknown Mark";
+                let goodsArray = [];
                 
-        if goods_list:
-            goods_text = "\n\n".join(goods_list)
-        else:
-            goods_text = "Goods boundaries not found. Please manually copy from TSDR."
+                // Extract Mark Name
+                let keys = document.querySelectorAll('div.key');
+                for (let k of keys) {
+                    let text = k.textContent.trim();
+                    if (text === 'Mark:' || text === 'Word Mark:') {
+                        let val = k.nextElementSibling;
+                        if (val && val.classList.contains('value')) {
+                            markName = val.textContent.trim();
+                            break;
+                        }
+                    }
+                }
+                
+                // Extract Goods by iterating over entire Rows (Avoids missing spaces)
+                let rows = document.querySelectorAll('div.row');
+                for (let row of rows) {
+                    let keyNode = row.querySelector('div.key');
+                    let valNode = row.querySelector('div.value');
+                    if (keyNode && valNode) {
+                        if (keyNode.textContent.trim() === 'For:') {
+                            // Clean up invisible USPTO tabs and spaces
+                            let cleanGoods = valNode.textContent.replace(/\\s+/g,' ').trim();
+                            if (cleanGoods) {
+                                goodsArray.push(cleanGoods);
+                            }
+                        }
+                    }
+                }
+                return {
+                    mark: markName,
+                    goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
+                };
+            }
+            """
             
-        return mark_name, goods_text
-        
-    except requests.exceptions.Timeout:
-        return None, "Error: USPTO API request timed out."
-    except Exception as e:
-        return None, f"Error fetching API data: {str(e)}"
+            result = page.evaluate(js_extract)
+            mark_name = result.get('mark', 'Unknown Mark')
+            goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
+            
+            browser.close()
+            return mark_name, goods_text
+            
+        except Exception as e:
+            browser.close()
+            return None, f"Error fetching data: {str(e)}"
 
 # ==========================================
 # 3. HELPER: CLEAN & SCORE RESULTS
@@ -247,12 +272,15 @@ def run():
         app_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", key="applicant_class")
 
     if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Fetching Client Data via USPTO API..."):
+        with st.spinner("Scraping Client Data (Browser 1 of 2)..."):
             c_mark, c_goods = fetch_tsdr_data(client_sn, client_class)
             st.session_state['c_mark'] = c_mark
             st.session_state['c_goods_df'] = parse_goods_to_df(c_goods)
             
-        with st.spinner("Fetching Applicant Data via USPTO API..."):
+        gc.collect() 
+        time.sleep(2) 
+        
+        with st.spinner("Scraping Applicant Data (Browser 2 of 2)..."):
             a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
             st.session_state['a_mark'] = a_mark
             st.session_state['a_goods_df'] = parse_goods_to_df(a_goods)
