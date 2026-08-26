@@ -439,7 +439,7 @@ def download_official_tsdr_pdfs_batch(selected_df):
 
             # 4. Click the exact button ID to download the PDF
             with page.expect_download(timeout=15000) as download_info:
-            page.click("#downloadSubmit")
+                page.click("#downloadSubmit")
 
             download = download_info.value
             with open(download.path(), "rb") as f:
@@ -447,14 +447,11 @@ def download_official_tsdr_pdfs_batch(selected_df):
 
             if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
                 pdf_dict[num_to_use] = pdf_bytes
-          else:
-            errors.append(
+            else:
+                errors.append(
                 f"Reg #{num_to_use}: Captured file was not a valid PDF."
             )
-
-        except Exception as e:
-          errors.append(f"Reg #{num_to_use}: {str(e)}")
-
+      
       browser.close()
     except Exception as e:
       errors.append(f"Browser automation error: {str(e)}")
