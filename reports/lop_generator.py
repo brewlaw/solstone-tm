@@ -61,9 +61,7 @@ def parse_goods_to_df(raw_goods):
         
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
-# ==========================================
-# 3. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
-# ==========================================
+
 # ==========================================
 # 3. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
@@ -95,19 +93,19 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
-                # STANDARD DOM WAIT (No clicking, just waiting for the page to render)
-                try:
-                    page.wait_for_selector("div.value", state="attached", timeout=15000)
-                except:
-                    try:
-                        page.locator('#searchNumber').fill(serial_number)
-                        page.locator('#searchNumber').press("Enter")
-                        page.wait_for_selector("div.value", state="attached", timeout=15000)
-                    except:
-                        pass 
-                    
-                page.wait_for_timeout(2000) 
+                # Give the basic TSDR framework a moment to render
+                page.wait_for_timeout(3000)
                 
+                # SAFELY attempt to click "Expand All" to reveal hidden Goods
+                # If it takes more than 3 seconds to find the button, it ignores it and moves on without crashing.
+                try:
+                    expand_btn = page.locator("text='Expand All'").first
+                    if expand_btn.is_visible(timeout=3000):
+                        expand_btn.click(force=True)
+                        page.wait_for_timeout(1000) # Quick pause to let the animation finish opening
+                except:
+                    pass 
+                    
                 if "Access Denied" in page.content():
                     browser.close()
                     raise Exception("USPTO Firewall Blocked the Connection.")
@@ -117,68 +115,37 @@ def fetch_tsdr_data(serial_number, target_classes):
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    // STRATEGY 1: Standard TSDR div.key extraction
-                    let keys = document.querySelectorAll('div.key');
-                    for (let k of keys) {
-                        let text = k.textContent.trim().replace(/:/g, '');
-                        if (text === 'Mark' || text === 'Word Mark' || text === 'Literal Element') {
-                            let val = k.nextElementSibling;
-                            if (val && val.classList.contains('value')) {
-                                markName = val.textContent.trim();
-                                if (markName !== "") break;
+                    // Look through every valid container on the page
+                    let elements = document.querySelectorAll('.key, .label, td, th, div');
+                    for (let el of elements) {
+                        let text = el.textContent.trim();
+                        
+                        // 1. STRICT Mark Name Extraction
+                        if (text === 'Mark:' || text === 'Word Mark:' || text === 'Literal Element:') {
+                            let nextNode = el.nextElementSibling;
+                            if (nextNode) {
+                                let val = nextNode.textContent.trim().replace(/\\s+/g, ' ');
+                                // Ensure it didn't accidentally grab the 'Ser No' dropdown UI
+                                if (val && !val.includes("Ser No") && !val.includes("Serial,") && val.length > 0) {
+                                    markName = val;
+                                }
+                            }
+                        }
+                        
+                        // 2. STRICT Goods Extraction
+                        if (text === 'For:') {
+                            let nextNode = el.nextElementSibling;
+                            if (nextNode) {
+                                let val = nextNode.textContent.trim().replace(/\\s+/g, ' ');
+                                if (val) {
+                                    goodsArray.push(val);
+                                }
                             }
                         }
                     }
                     
-                    let rows = document.querySelectorAll('div.row');
-                    for (let row of rows) {
-                        let keyNode = row.querySelector('div.key');
-                        let valNode = row.querySelector('div.value');
-                        if (keyNode && valNode) {
-                            let text = keyNode.textContent.trim().replace(/:/g, '');
-                            if (text === 'For') {
-                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
-                                if (cleanGoods) {
-                                    goodsArray.push(cleanGoods);
-                                }
-                            }
-                        }
-                    }
-
-                    // STRATEGY 2: Fallback to Summary Table extraction (For newer/different TSDR layouts)
-                    if (markName === "Unknown Mark") {
-                        let tds = document.querySelectorAll('td, th');
-                        for (let i = 0; i < tds.length; i++) {
-                            let text = tds[i].textContent.trim().replace(/:/g, '');
-                            if (text === 'Mark' || text === 'Word Mark') {
-                                let nextNode = tds[i].nextElementSibling;
-                                if (nextNode) {
-                                    markName = nextNode.textContent.trim();
-                                    if (markName !== "") break;
-                                }
-                            }
-                        }
-                    }
-
-                    // STRATEGY 3: Ultimate Regex Fallback on raw page text
-                    if (markName === "Unknown Mark" || goodsArray.length === 0) {
-                        let fullText = document.body.innerText;
-                        
-                        if (markName === "Unknown Mark") {
-                            let mMatch = fullText.match(/(?:Mark|Word Mark|Literal Element):\\s*([^\\n]+)/i);
-                            if (mMatch && mMatch[1]) markName = mMatch[1].trim();
-                        }
-                        
-                        if (goodsArray.length === 0) {
-                            let forParts = fullText.split(/For:/i);
-                            if (forParts.length > 1) {
-                                for (let i = 1; i < forParts.length; i++) {
-                                    let chunk = forParts[i].split(/International Class:|Class Status:|US Class:|Filing Date:/i)[0].trim();
-                                    if (chunk) goodsArray.push(chunk.replace(/\\s+/g, ' '));
-                                }
-                            }
-                        }
-                    }
+                    // Deduplicate identical goods clauses just in case TSDR rendered them twice
+                    goodsArray = [...new Set(goodsArray)];
                     
                     return { 
                         mark: markName, 
@@ -193,10 +160,11 @@ def fetch_tsdr_data(serial_number, target_classes):
                 
                 browser.close()
                 
-                # BUG FIX: Only trigger a retry if BOTH failed completely. 
+                # If everything failed, trigger the retry loop
                 if mark_name == "Unknown Mark" and "Goods boundaries not found" in goods_text:
                     raise Exception("Page loaded but data was missing. Retrying...")
                     
+                # If only the mark name is missing (Design Mark), label it appropriately
                 if mark_name == "Unknown Mark":
                     mark_name = "[Design Mark / Unlabeled]"
                     
