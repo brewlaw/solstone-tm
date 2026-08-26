@@ -40,11 +40,14 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. TSDR SCRAPER FUNCTION (PLAYWRIGHT "DOUBLE-TAP")
+# 2. TSDR COMBINED SCRAPER (SINGLE BROWSER)
 # ==========================================
-def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR by actively waiting for text to render, then natively targeting the DOM."""
-    if not serial_number: return None, None
+def fetch_both_tsdr_data(client_sn, app_sn):
+    """Fetches Client AND Applicant TSDR data inside a single browser tab using human search box navigation."""
+    results = {
+        "client": ("Unknown Mark", "Goods boundaries not found. Please manually copy from TSDR."),
+        "applicant": ("Unknown Mark", "Goods boundaries not found. Please manually copy from TSDR.")
+    }
     
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -64,81 +67,85 @@ def fetch_tsdr_data(serial_number, target_classes):
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
         
-        try:
-            # 1. Direct URL navigation
-            url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-            page.goto(url, timeout=30000)
+        js_extract = """
+        () => {
+            let markName = "Unknown Mark";
+            let goodsArray = [];
             
-            # 2. BULLETPROOF WAIT: Do not move forward until the word "Mark:" physically renders on the page.
-            try:
-                page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-            except:
-                # If the URL failed to auto-search, act like a human: type it in and hit enter.
-                try:
-                    page.locator('#searchNumber').fill(serial_number)
-                    page.locator('#searchNumber').press("Enter")
-                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                except:
-                    pass # Let it try to extract anyway
-            
-            # Quick 2-second buffer to let the rest of the tables finish popping in
-            page.wait_for_timeout(2000)
-            
-            if "Access Denied" in page.content():
-                browser.close()
-                return None, "USPTO Firewall Blocked the Connection."
-            
-            # 3. Inject JS to parse the rows exactly as shown in your inspector screenshots
-            js_extract = """
-            () => {
-                let markName = "Unknown Mark";
-                let goodsArray = [];
-                
-                // Extract Mark Name
-                let keys = document.querySelectorAll('div.key');
-                for (let k of keys) {
-                    let text = k.textContent.trim();
-                    if (text === 'Mark:' || text === 'Word Mark:') {
-                        let val = k.nextElementSibling;
-                        if (val && val.classList.contains('value')) {
-                            markName = val.textContent.trim();
-                            break;
-                        }
+            // Extract Mark Name
+            let keys = document.querySelectorAll('div.key');
+            for (let k of keys) {
+                let text = k.textContent.trim();
+                if (text === 'Mark:' || text === 'Word Mark:') {
+                    let val = k.nextElementSibling;
+                    if (val && val.classList.contains('value')) {
+                        markName = val.textContent.trim();
+                        break;
                     }
                 }
-                
-                // Extract Goods by iterating over entire Rows (Avoids missing spaces)
-                let rows = document.querySelectorAll('div.row');
-                for (let row of rows) {
-                    let keyNode = row.querySelector('div.key');
-                    let valNode = row.querySelector('div.value');
-                    if (keyNode && valNode) {
-                        if (keyNode.textContent.trim() === 'For:') {
-                            // Clean up invisible USPTO tabs and spaces
-                            let cleanGoods = valNode.textContent.replace(/\\s+/g,' ').trim();
-                            if (cleanGoods) {
-                                goodsArray.push(cleanGoods);
-                            }
-                        }
-                    }
-                }
-                return {
-                    mark: markName,
-                    goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
-                };
             }
-            """
             
-            result = page.evaluate(js_extract)
-            mark_name = result.get('mark', 'Unknown Mark')
-            goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
-            
-            browser.close()
-            return mark_name, goods_text
-            
-        except Exception as e:
-            browser.close()
-            return None, f"Error fetching data: {str(e)}"
+            // Extract Goods
+            let rows = document.querySelectorAll('div.row');
+            for (let row of rows) {
+                let keyNode = row.querySelector('div.key');
+                let valNode = row.querySelector('div.value');
+                if (keyNode && valNode) {
+                    if (keyNode.textContent.trim() === 'For:') {
+                        let cleanGoods = valNode.textContent.replace(/\\s+/g,' ').trim();
+                        if (cleanGoods) {
+                            goodsArray.push(cleanGoods);
+                        }
+                    }
+                }
+            }
+            return {
+                mark: markName,
+                goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
+            };
+        }
+        """
+
+        # --- STEP A: FETCH CLIENT DATA ---
+        if client_sn:
+            try:
+                url = f"https://tsdr.uspto.gov/#caseNumber={client_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+                page.goto(url, timeout=30000)
+                page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                page.wait_for_timeout(1500)
+                res = page.evaluate(js_extract)
+                results["client"] = (res.get('mark'), res.get('goods'))
+            except Exception as e:
+                results["client"] = (None, f"Error fetching client: {str(e)}")
+
+        # --- STEP B: FETCH APPLICANT DATA (RE-USING SAME BROWSER & TAB) ---
+        if app_sn:
+            try:
+                # If page is already open, use search box like a human
+                if "tsdr.uspto.gov" in page.url:
+                    search_box = page.locator('#searchNumber')
+                    search_box.fill('')
+                    search_box.fill(str(app_sn))
+                    search_box.press("Enter")
+                    
+                    # Wait for TSDR to render new record
+                    page.wait_for_timeout(3000)
+                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                    res = page.evaluate(js_extract)
+                    results["applicant"] = (res.get('mark'), res.get('goods'))
+                else:
+                    # Direct load fallback if client was empty
+                    url = f"https://tsdr.uspto.gov/#caseNumber={app_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+                    page.goto(url, timeout=30000)
+                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                    page.wait_for_timeout(1500)
+                    res = page.evaluate(js_extract)
+                    results["applicant"] = (res.get('mark'), res.get('goods'))
+            except Exception as e:
+                results["applicant"] = (None, f"Error fetching applicant: {str(e)}")
+
+        browser.close()
+        return results["client"], results["applicant"]
 
 # ==========================================
 # 3. HELPER: CLEAN & SCORE RESULTS
@@ -272,16 +279,15 @@ def run():
         app_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", key="applicant_class")
 
     if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Scraping Client Data (Browser 1 of 2)..."):
-            c_mark, c_goods = fetch_tsdr_data(client_sn, client_class)
+        with st.spinner("Scraping Client and Applicant Data in single browser session..."):
+            c_data, a_data = fetch_both_tsdr_data(client_sn, app_sn)
+            
+            c_mark, c_goods = c_data
+            a_mark, a_goods = a_data
+            
             st.session_state['c_mark'] = c_mark
             st.session_state['c_goods_df'] = parse_goods_to_df(c_goods)
             
-        gc.collect() 
-        time.sleep(2) 
-        
-        with st.spinner("Scraping Applicant Data (Browser 2 of 2)..."):
-            a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
             st.session_state['a_mark'] = a_mark
             st.session_state['a_goods_df'] = parse_goods_to_df(a_goods)
             
