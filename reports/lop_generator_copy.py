@@ -1,15 +1,42 @@
 import streamlit as st
 import time
 import re
+import gc
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# --- KEEP YOUR EXISTING IMPORTS HERE ---
-# Make sure your bridging search function is imported. For example:
-# from utils import run_uspto_bridging_search 
+# Import your actual USPTO scraper
+from scrapers.uspto_scraper import scrape_uspto
 
 # ==========================================
-# 1. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
+# 1. HELPER: PARSE GOODS INTO CHECKLIST
+# ==========================================
+def parse_goods_to_df(raw_goods):
+    """Splits raw goods text by semicolons/newlines into a DataFrame for the checklist UI."""
+    if not raw_goods or "Goods boundaries not found" in raw_goods:
+        return pd.DataFrame({"Select": [False], "Keyword": [raw_goods]})
+    
+    # Split by semicolon or new line
+    raw_items = re.split(r'[;\n]', raw_goods)
+    
+    cleaned_items = []
+    for item in raw_items:
+        clean_item = item.strip()
+        # Remove empty items
+        if clean_item:
+            cleaned_items.append(clean_item)
+            
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_items = [x for x in cleaned_items if not (x in seen or seen.add(x))]
+    
+    if not unique_items:
+        return pd.DataFrame({"Select": [], "Keyword": []})
+        
+    return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
+
+# ==========================================
+# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
     """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
@@ -40,7 +67,6 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
-                # BULLETPROOF WAIT: Wait for the actual data value boxes to physically attach to the DOM
                 try:
                     page.wait_for_selector("div.value", state="attached", timeout=15000)
                 except:
@@ -102,7 +128,6 @@ def fetch_tsdr_data(serial_number, target_classes):
                 
                 browser.close()
                 
-                # SAFEGUARD: If it somehow still pulled blank data, throw an error to force a retry!
                 if mark_name == "Unknown Mark":
                     raise Exception("Page loaded but data was missing. Retrying...")
                     
@@ -136,35 +161,63 @@ def run():
         app_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", key="applicant_class")
 
     if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Bypassing USPTO Firewall & Scraping Data..."):
+        with st.spinner("Scraping Client Data (Browser 1 of 2)..."):
             c_mark, c_goods = fetch_tsdr_data(client_sn, client_class)
-            a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
-            
             st.session_state['c_mark'] = c_mark
-            st.session_state['a_mark'] = a_mark
-            st.session_state['c_goods'] = c_goods
-            st.session_state['a_goods'] = a_goods
+            st.session_state['c_goods_df'] = parse_goods_to_df(c_goods)
+            
+        gc.collect() 
+        time.sleep(2) 
 
-    st.info("Trim down the text below to isolate the exact goods/services you want to cross-reference.")
+        with st.spinner("Scraping Applicant Data (Browser 2 of 2)..."):
+            a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
+            st.session_state['a_mark'] = a_mark
+            st.session_state['a_goods_df'] = parse_goods_to_df(a_goods)
+            
+        st.rerun()
+
+    st.info("Check the boxes next to the specific goods/services you want to cross-reference. You can double-click a keyword in the table to manually edit it!")
 
     col3, col4 = st.columns(2)
     with col3:
         st.markdown(f"**Mark:** {st.session_state.get('c_mark', 'None')}")
-        core_client = st.text_area("Client Keywords", value=st.session_state.get('c_goods', ''), height=150)
+        if 'c_goods_df' in st.session_state:
+            # Use data_editor so user can check boxes AND edit text manually if needed
+            edited_c_df = st.data_editor(
+                st.session_state['c_goods_df'],
+                hide_index=True,
+                use_container_width=True,
+                key="c_goods_editor",
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", width="small"),
+                    "Keyword": st.column_config.TextColumn("Client Keywords", width="large")
+                }
+            )
+            st.session_state['c_goods_df'] = edited_c_df
+
     with col4:
         st.markdown(f"**Mark:** {st.session_state.get('a_mark', 'None')}")
-        core_target = st.text_area("Applicant Keywords", value=st.session_state.get('a_goods', ''), height=150)
+        if 'a_goods_df' in st.session_state:
+            edited_a_df = st.data_editor(
+                st.session_state['a_goods_df'],
+                hide_index=True,
+                use_container_width=True,
+                key="a_goods_editor",
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", width="small"),
+                    "Keyword": st.column_config.TextColumn("Applicant Keywords", width="large")
+                }
+            )
+            st.session_state['a_goods_df'] = edited_a_df
 
     # --- STEP 2: BRIDGING SEARCH ---
     st.divider()
     st.markdown("### Step 2: Bridging Search")
     if st.button("Execute Bridging Search"):
         
-        # Pull directly from whatever the user typed in Step 1
+        # 1. Class Check
         raw_c = st.session_state.get('client_class', '')
         raw_t = st.session_state.get('applicant_class', '')
-        
-        # Ensure they are 3 digits
         c_class = str(raw_c).strip().zfill(3)
         t_class = str(raw_t).strip().zfill(3)
         
@@ -172,24 +225,60 @@ def run():
             st.error("Please enter both the Client and Applicant classes in Step 1 before searching!")
             st.stop()
             
+        # 2. Extract Selected Keywords
+        if 'c_goods_df' not in st.session_state or 'a_goods_df' not in st.session_state:
+            st.error("Please fetch TSDR data first.")
+            st.stop()
+            
+        c_df = st.session_state['c_goods_df']
+        a_df = st.session_state['a_goods_df']
+        
+        c_selected = c_df[c_df['Select'] == True]['Keyword'].tolist()
+        a_selected = a_df[a_df['Select'] == True]['Keyword'].tolist()
+        
+        if not c_selected or not a_selected:
+            st.error("Please check at least one box for BOTH the Client and the Applicant keywords.")
+            st.stop()
+            
         with st.spinner("Searching USPTO via tmsearch.uspto.gov..."):
             
-            c_kw = core_client.strip().replace('"', '')
-            t_kw = core_target.strip().replace('"', '')
-
-            # The Exact Search Query with the Live Document parameter
-            search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class} AND LD:true'
+            # Clean quotes and format into OR statements: GS:("Beer" OR "Ale")
+            c_clean = [kw.strip().replace('"', '') for kw in c_selected]
+            t_clean = [kw.strip().replace('"', '') for kw in a_selected]
             
-            # Execute search
-            results_df = run_uspto_bridging_search(search_query, max_results=20)
+            c_kw_str = " OR ".join([f'"{kw}"' for kw in c_clean])
+            t_kw_str = " OR ".join([f'"{kw}"' for kw in t_clean])
+
+            # The dynamic search query (wrapped in parentheses to handle multiple selections safely)
+            search_query = f'GS:({t_kw_str}) AND GS:({c_kw_str}) AND IC:{c_class} AND IC:{t_class} AND LD:true'
+            
+            raw_results = []
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-dev-shm-usage']
+                    )
+                    page = browser.new_page()
+                    excel_out = "temp_bridging_search.xlsx" 
+                    
+                    raw_results = scrape_uspto(
+                        page=page,
+                        primary_query=search_query,
+                        excel_filename=excel_out
+                    )
+                    browser.close()
+            except Exception as e:
+                st.error(f"Error scraping USPTO: {e}")
+                st.stop()
+                
+            results_df = pd.DataFrame(raw_results)
             
             if results_df.empty:
-                st.warning(f"No bridging registrations found for query: `{search_query}`. Try broadening your keywords.")
+                st.warning(f"No bridging registrations found for query: `{search_query}`. Try checking different keyword boxes.")
             else:
-                # FILTER AND FORMAT THE GOODS
                 def clean_goods(text, c_cls, t_cls):
                     if not isinstance(text, str): return text
-                    
                     segments = re.finditer(r'IC\s+0*(\d+)[\s:]+(.*?)(?=IC\s+\d+|$)', text, re.IGNORECASE | re.DOTALL)
                     target_classes = {c_cls.lstrip('0'), t_cls.lstrip('0'), c_cls, t_cls}
                     filtered = []
@@ -202,7 +291,10 @@ def run():
                             
                     return "\n\n".join(filtered) if filtered else text
                 
-                col_name = "Goods & services" if "Goods & services" in results_df.columns else "Goods"
+                col_name = "goods" if "goods" in results_df.columns else "Goods"
+                if col_name not in results_df.columns and "Goods & services" in results_df.columns:
+                    col_name = "Goods & services"
+                    
                 if col_name in results_df.columns:
                     results_df[col_name] = results_df[col_name].apply(lambda x: clean_goods(x, c_class, t_class))
 
@@ -227,7 +319,8 @@ def run():
             hide_index=True,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", help="Check to include in LOP"),
-                "Goods & services": st.column_config.TextColumn("Filtered Goods", width="large"),
-                "Goods": st.column_config.TextColumn("Filtered Goods", width="large")
+                "goods": st.column_config.TextColumn("Filtered Goods", width="large"),
+                "Goods": st.column_config.TextColumn("Filtered Goods", width="large"),
+                "Goods & services": st.column_config.TextColumn("Filtered Goods", width="large")
             }
         )
