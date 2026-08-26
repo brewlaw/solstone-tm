@@ -35,13 +35,13 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
-# ==========================================
-# ==========================================
-# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
+# 2. INITIAL DATA SCRAPER (TMSearch Web UI)
 # ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
+    """
+    Replaces the broken TSDR scraper. 
+    Mimics uspto_scraper.py to search TMSearch directly and copies goods from the DOM.
+    """
     if not serial_number: return None, None
         
     max_retries = 3
@@ -50,112 +50,93 @@ def fetch_tsdr_data(serial_number, target_classes):
             with sync_playwright() as p:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=[
-                        '--no-sandbox', 
-                        '--disable-dev-shm-usage', 
-                        '--disable-gpu', 
-                        '--disable-blink-features=AutomationControlled'
-                    ]
+                    args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
                 )
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    viewport={"width": 1920, "height": 1080},
-                    java_script_enabled=True
-                )
-                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                page = context.new_page()
+                page = browser.new_page()
                 
-                url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                page.goto(url, timeout=30000)
-                
-                # Wait for either DIVs (old layout) or TDs (new layout)
-                try:
-                    page.wait_for_selector("div.value, td.value", state="attached", timeout=15000)
-                except:
-                    try:
-                        page.locator('#searchNumber').fill(serial_number)
-                        page.locator('#searchNumber').press("Enter")
-                        page.wait_for_selector("div.value, td.value", state="attached", timeout=15000)
-                    except:
-                        pass 
-                    
-                page.wait_for_timeout(2000) 
+                # 1. Navigate to TMSearch using the exact same flow as uspto_scraper.py
+                page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=45000, wait_until="domcontentloaded")
+                time.sleep(2)
 
-                # SAFE EXPAND: Click 'Expand All' if the goods are hidden (fixes the 99760423 bug)
-                try:
-                    expand_btn = page.locator("text='Expand All'").first
-                    if expand_btn.is_visible(timeout=2000):
-                        expand_btn.click(force=True)
-                        page.wait_for_timeout(1000)
-                except:
-                    pass
+                # 2. Locate the search box
+                search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
                 
-                if "Access Denied" in page.content():
-                    browser.close()
-                    raise Exception("USPTO Firewall Blocked the Connection.")
+                try:
+                    search_input.wait_for(state="visible", timeout=5000)
+                except:
+                    builder_toggle = page.locator("text='Field tag and Search builder'").last
+                    if builder_toggle.is_visible():
+                        builder_toggle.click(force=True)
+                        time.sleep(1)
+                    search_input = page.get_by_placeholder("Search using field tags").first
+                    search_input.wait_for(state="visible", timeout=10000)
 
-                # DUAL-LAYOUT JS: Parses both the old DIVs and the new TABLEs seamlessly
+                # 3. Format the SN or RN query
+                num_str = str(serial_number).strip()
+                query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
+                
+                # 4. Fill and hit Enter!
+                search_input.fill(query)
+                page.keyboard.press("Enter")
+                
+                # 5. Wait for the goods container to load on the single-result page
+                page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
+                
+                # 6. Extract directly from the page DOM and clean out prefixes/dates
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    let elements = document.querySelectorAll('.key, .label, th, td');
-                    for (let el of elements) {
-                        let text = el.textContent.trim().replace(/:/g, '');
-                        
-                        // 1. Get Mark Name (ignoring the 'Ser No' search UI)
-                        if (text === 'Mark' || text === 'Word Mark') {
-                            let nextNode = el.nextElementSibling || el.nextSibling;
-                            if (nextNode) {
-                                let val = nextNode.textContent.trim();
-                                if (val && !val.includes("Ser No")) {
-                                    markName = val;
-                                }
-                            }
-                        }
-                        
-                        // 2. Get Goods
-                        if (text === 'For') {
-                            let nextNode = el.nextElementSibling || el.nextSibling;
-                            if (nextNode) {
-                                let cleanGoods = nextNode.textContent.replace(/\\s+/g, ' ').trim();
-                                if (cleanGoods) {
-                                    goodsArray.push(cleanGoods);
-                                }
-                            }
+                    // Grab Mark Name
+                    let elements = Array.from(document.querySelectorAll('*'));
+                    let wmLabel = elements.find(el => el.textContent.trim() === 'Wordmark');
+                    if (wmLabel && wmLabel.nextElementSibling) {
+                        markName = wmLabel.nextElementSibling.textContent.trim();
+                    }
+                    
+                    // Grab Goods and strip Class numbers & dates
+                    let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
+                    if (goodsBox) {
+                        let pTags = goodsBox.querySelectorAll('p');
+                        if (pTags.length > 0) {
+                            pTags.forEach(p => {
+                                let text = p.textContent.trim().replace(/\\s+/g, ' ');
+                                // Remove 'IC 032:'
+                                text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
+                                // Remove ' | First Use...'
+                                text = text.split('|')[0].trim();
+                                if (text) goodsArray.push(text);
+                            });
+                        } else {
+                            let text = goodsBox.textContent.trim().replace(/\\s+/g, ' ');
+                            text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
+                            text = text.split('|')[0].trim();
+                            if (text) goodsArray.push(text);
                         }
                     }
                     
-                    goodsArray = [...new Set(goodsArray)]; // Deduplicate just in case
-                    
                     return { 
                         mark: markName, 
-                        goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
+                        goods: goodsArray.length > 0 ? goodsArray.join("; ") : "Goods boundaries not found." 
                     };
                 }
                 """
                 
                 result = page.evaluate(js_extract)
-                mark_name = result.get('mark', 'Unknown Mark')
-                goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
-                
                 browser.close()
                 
-                if mark_name == "Unknown Mark" and "Goods boundaries not found" in goods_text:
-                    raise Exception("Page loaded but data was missing. Retrying...")
+                if result['mark'] == "Unknown Mark" and "Goods boundaries not found" in result['goods']:
+                    raise Exception("Failed to extract data from TMSearch.")
                     
-                if mark_name == "Unknown Mark":
-                    mark_name = "[Design Mark / Unlabeled]"
-                    
-                return mark_name, goods_text
+                return result['mark'], result['goods']
                 
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2)
                 continue
             else:
-                return None, f"Error fetching data after 3 attempts: {str(e)}"
+                return "Error", f"Failed to fetch data after 3 attempts: {str(e)}"
 
 
 # ==========================================
