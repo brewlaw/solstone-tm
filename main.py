@@ -2,7 +2,7 @@ import os
 os.system("playwright install chromium")
 
 import streamlit as st
-from reports import status_report, clearance_tool, monitoring_tool, section_2e_tool, lop_generator, test
+from reports import status_report, clearance_tool, monitoring_tool, section_2e_tool, lop_generator
 from utils.saved_searches import get_saved_searches, delete_saved_search
 
 st.set_page_config(page_title="Solstone IP Suite", layout="wide", page_icon="⚖️")
@@ -24,8 +24,7 @@ tool = st.sidebar.radio(
         "Letter of Protest Generator",
         "Cloud Report Archive"
         "GOODS/SERVICES DESCRIPTION BUILDER"
-        "TEST"
-    ]
+            ]
 )
 
 def show_saved_monitoring():
@@ -168,5 +167,4 @@ elif tool == "Letter of Protest Generator":
     lop_generator.run()
 elif tool == "Cloud Report Archive":
     show_drive_archive()
-elif tool == "TEST":
-    test.run()
+
