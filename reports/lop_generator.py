@@ -630,18 +630,6 @@ def run():
         st.markdown("### Step 3: Select Evidence")
 
         df = st.session_state.get("bridging_results", pd.DataFrame())
-        if not df.empty:
-            df["Owner_Key"] = df["Owner"].apply(normalize_owner_name)
-            df = (
-                df.drop_duplicates(subset=["Owner_Key"], keep="first")
-                .drop(columns=["Owner_Key"])
-                .reset_index(drop=True)
-            )
-            if "Select" not in df.columns:
-                df.insert(0, "Select", False)
-            df["Select"] = df["Select"].fillna(False).astype(bool)
-            st.session_state["bridging_results"] = df
-
         results_count = len(df)
 
         if results_count < 10:
@@ -822,6 +810,7 @@ def run():
                 df,
                 hide_index=True,
                 width="stretch",
+                key="evidence_table_editor",
                 column_config={
                     "Select": st.column_config.CheckboxColumn(
                         "Select", help="Check to include in LOP"
@@ -833,130 +822,135 @@ def run():
             )
             st.session_state["bridging_results"] = edited_df
 
-            # --- STEP 4: AUTOMATED EXPORT & STITCHING ---
-            selected_rows = edited_df[edited_df["Select"] == True]
+        # --- STEP 4: AUTOMATED EXPORT & STITCHING ---
+        current_df = st.session_state.get("bridging_results", pd.DataFrame())
+        selected_rows = (
+            current_df[current_df["Select"] == True]
+            if not current_df.empty and "Select" in current_df.columns
+            else pd.DataFrame()
+        )
 
-            st.divider()
-            st.markdown("### Step 4: Export Exhibit A Package")
+        st.divider()
+        st.markdown("### Step 4: Export Exhibit A Package")
 
-            if selected_rows.empty:
-                st.info(
-                    "💡 Check the boxes next to the marks in Step 3 above to compile your Exhibit A package."
-                )
-            else:
-                st.success(
-                    f"Ready! **{len(selected_rows)}** registration(s) selected for Exhibit A."
-                )
+        if selected_rows.empty:
+            st.info(
+                "💡 Check the boxes next to the marks in Step 3 above to compile your Exhibit A package."
+            )
+        else:
+            st.success(
+                f"Ready! **{len(selected_rows)}** registration(s) selected for Exhibit A."
+            )
 
-                if st.button(
-                    "📦 Generate & Download Official Exhibit A Package", type="primary"
+            if st.button(
+                "📦 Generate & Download Official Exhibit A Package", type="primary"
+            ):
+                with st.spinner(
+                    f"Fetching official TSDR status PDFs from USPTO for {len(selected_rows)} mark(s)..."
                 ):
-                    with st.spinner(
-                        f"Fetching official TSDR status PDFs from USPTO for {len(selected_rows)} mark(s)..."
-                    ):
-                        pdf_dict, errors = download_official_tsdr_pdfs_batch(selected_rows)
+                    pdf_dict, errors = download_official_tsdr_pdfs_batch(selected_rows)
 
-                        cover_buffer = generate_exhibit_cover_pdf(selected_rows)
+                    cover_buffer = generate_exhibit_cover_pdf(selected_rows)
 
+                    writer = PdfWriter()
+                    cover_reader = PdfReader(cover_buffer)
+                    for page in cover_reader.pages:
+                        writer.add_page(page)
+
+                    attached_count = 0
+                    for _, row in selected_rows.iterrows():
+                        reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+                        sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+                        num_key = (
+                            reg_num
+                            if reg_num and reg_num.lower() != "nan" and reg_num != ""
+                            else sn_num
+                        )
+
+                        if num_key in pdf_dict:
+                            tsdr_reader = PdfReader(BytesIO(pdf_dict[num_key]))
+                            for page in tsdr_reader.pages:
+                                writer.add_page(page)
+                            attached_count += 1
+
+                    final_buffer = BytesIO()
+                    writer.write(final_buffer)
+                    final_buffer.seek(0)
+
+                    st.session_state["exhibit_pdf_bytes"] = final_buffer.getvalue()
+                    st.session_state["attached_count"] = attached_count
+                    st.session_state["download_errors"] = errors
+
+            if "exhibit_pdf_bytes" in st.session_state:
+                st.download_button(
+                    label=(
+                        f"📄 Download Completed Exhibit A Package ({st.session_state.get('attached_count', 0)} Official TSDR PDFs Attached)"
+                    ),
+                    data=st.session_state["exhibit_pdf_bytes"],
+                    file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    width="stretch",
+                )
+
+                if st.session_state.get("download_errors"):
+                    st.divider()
+                    st.warning(
+                        "⚠️ **Streamlit Cloud Firewall Notice:** The USPTO Akamai firewall blocked direct automated downloads for some records. Click the links below to open TSDR, hit **Download > Status (PDF)**, and upload to re-stitch:"
+                    )
+
+                    link_cols = st.columns(2)
+                    for idx, (_, row) in enumerate(selected_rows.iterrows()):
+                        reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+                        sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+                        num_to_use = (
+                            reg_num
+                            if reg_num and reg_num.lower() != "nan" and reg_num != ""
+                            else sn_num
+                        )
+                        mark_txt = str(row.get("Mark", "Unknown"))
+
+                        tsdr_url = (
+                            f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+                        )
+                        col_target = link_cols[0] if idx % 2 == 0 else link_cols[1]
+                        col_target.markdown(
+                            f"🔗 **[{idx+1}. {mark_txt} (Reg #{num_to_use})]({tsdr_url})**"
+                        )
+
+                    uploaded_tsdr_files = st.file_uploader(
+                        "Upload downloaded TSDR Status PDFs to re-stitch:",
+                        type=["pdf"],
+                        accept_multiple_files=True,
+                        key="manual_tsdr_uploader",
+                    )
+
+                    if uploaded_tsdr_files:
                         writer = PdfWriter()
+                        cover_buffer = generate_exhibit_cover_pdf(selected_rows)
                         cover_reader = PdfReader(cover_buffer)
                         for page in cover_reader.pages:
                             writer.add_page(page)
 
-                        attached_count = 0
-                        for _, row in selected_rows.iterrows():
-                            reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
-                            sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
-                            num_key = (
-                                reg_num
-                                if reg_num and reg_num.lower() != "nan" and reg_num != ""
-                                else sn_num
-                            )
-
-                            if num_key in pdf_dict:
-                                tsdr_reader = PdfReader(BytesIO(pdf_dict[num_key]))
-                                for page in tsdr_reader.pages:
-                                    writer.add_page(page)
-                                attached_count += 1
-
-                        final_buffer = BytesIO()
-                        writer.write(final_buffer)
-                        final_buffer.seek(0)
-
-                        st.session_state["exhibit_pdf_bytes"] = final_buffer.getvalue()
-                        st.session_state["attached_count"] = attached_count
-                        st.session_state["download_errors"] = errors
-
-                if "exhibit_pdf_bytes" in st.session_state:
-                    st.download_button(
-                        label=(
-                            f"📄 Download Completed Exhibit A Package ({st.session_state.get('attached_count', 0)} Official TSDR PDFs Attached)"
-                        ),
-                        data=st.session_state["exhibit_pdf_bytes"],
-                        file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
-                        mime="application/pdf",
-                        type="primary",
-                        width="stretch",
-                    )
-
-                    if st.session_state.get("download_errors"):
-                        st.divider()
-                        st.warning(
-                            "⚠️ **Streamlit Cloud Firewall Notice:** The USPTO Akamai firewall blocked direct automated downloads for some records. Click the links below to open TSDR, hit **Download > Status (PDF)**, and upload to re-stitch:"
-                        )
-
-                        link_cols = st.columns(2)
-                        for idx, (_, row) in enumerate(selected_rows.iterrows()):
-                            reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
-                            sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
-                            num_to_use = (
-                                reg_num
-                                if reg_num and reg_num.lower() != "nan" and reg_num != ""
-                                else sn_num
-                            )
-                            mark_txt = str(row.get("Mark", "Unknown"))
-
-                            tsdr_url = (
-                                f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                            )
-                            col_target = link_cols[0] if idx % 2 == 0 else link_cols[1]
-                            col_target.markdown(
-                                f"🔗 **[{idx+1}. {mark_txt} (Reg #{num_to_use})]({tsdr_url})**"
-                            )
-
-                        uploaded_tsdr_files = st.file_uploader(
-                            "Upload downloaded TSDR Status PDFs to re-stitch:",
-                            type=["pdf"],
-                            accept_multiple_files=True,
-                            key="manual_tsdr_uploader",
-                        )
-
-                        if uploaded_tsdr_files:
-                            writer = PdfWriter()
-                            cover_buffer = generate_exhibit_cover_pdf(selected_rows)
-                            cover_reader = PdfReader(cover_buffer)
-                            for page in cover_reader.pages:
+                        for u_file in uploaded_tsdr_files:
+                            reader = PdfReader(u_file)
+                            for page in reader.pages:
                                 writer.add_page(page)
 
-                            for u_file in uploaded_tsdr_files:
-                                reader = PdfReader(u_file)
-                                for page in reader.pages:
-                                    writer.add_page(page)
+                        restitched_buffer = BytesIO()
+                        writer.write(restitched_buffer)
+                        restitched_buffer.seek(0)
 
-                            restitched_buffer = BytesIO()
-                            writer.write(restitched_buffer)
-                            restitched_buffer.seek(0)
-
-                            st.download_button(
-                                label=(
-                                    f"📦 Download Re-Stitched Exhibit A Package ({len(uploaded_tsdr_files)} Uploaded PDFs Attached)"
-                                ),
-                                data=restitched_buffer.getvalue(),
-                                file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
-                                mime="application/pdf",
-                                type="primary",
-                                width="stretch",
-                            )
+                        st.download_button(
+                            label=(
+                                f"📦 Download Re-Stitched Exhibit A Package ({len(uploaded_tsdr_files)} Uploaded PDFs Attached)"
+                            ),
+                            data=restitched_buffer.getvalue(),
+                            file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
+                            mime="application/pdf",
+                            type="primary",
+                            width="stretch",
+                        )
 
 
 # Standalone execution entry point
