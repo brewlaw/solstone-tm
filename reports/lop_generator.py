@@ -15,16 +15,13 @@ from scrapers.uspto_scraper import scrape_uspto
 @st.cache_data
 def load_expansion_clusters():
     """Loads related term clusters from a CSV file where terms are in separate columns across a row."""
-    # Updated to look in the data folder!
     csv_path = "data/expansion_terms.csv" 
     clusters = []
     
     if os.path.exists(csv_path):
         try:
-            # Read CSV without assuming headers
             df = pd.read_csv(csv_path, header=None)
             for _, row in df.iterrows():
-                # Grab every valid cell across the entire row, ignore empty cells (NaN)
                 cluster = [str(val).strip().lower() for val in row.values if pd.notna(val) and str(val).strip()]
                 if cluster:
                     clusters.append(cluster)
@@ -39,12 +36,9 @@ def get_suggestions(keywords, clusters):
     kw_lower = {k.strip().lower() for k in keywords}
     
     for cluster in clusters:
-        # If any of the searched keywords intersect with this cluster...
         if kw_lower.intersection(cluster):
-            # Add ALL terms from that cluster into suggestions
             suggestions.update(cluster)
             
-    # Remove the keywords we already searched from the suggestions list
     suggestions = suggestions - kw_lower
     return sorted(list(suggestions))
 
@@ -88,7 +82,7 @@ def fetch_tsdr_data(serial_number, target_classes):
                     ]
                 )
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     viewport={"width": 1920, "height": 1080},
                     java_script_enabled=True
                 )
@@ -168,21 +162,26 @@ def fetch_tsdr_data(serial_number, target_classes):
                 return None, f"Error fetching data after 3 attempts: {str(e)}"
 
 # ==========================================
-# 4. HELPER: CLEAN & SCORE RESULTS
+# 4. HELPER: CLEAN & SCORE RESULTS (TIERED)
 # ==========================================
-def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
-    """Filters goods to relevant classes, isolates exact matches, and assigns a ranking score."""
+def clean_goods_exact_scored(text, c_cls, t_cls, all_c, all_t, orig_c, orig_t):
+    """Filters goods, isolates matches, and scores based on Original vs Expanded keyword tiers."""
     if not isinstance(text, str): return "", 0
     segments = re.finditer(r'IC\s*0*(\d+)[\s.:]+(.*?)(?=IC\s*\d+|$)', text, re.IGNORECASE | re.DOTALL)
     
     class_kws = {}
-    if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in c_kws]
+    if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in all_c]
     if t_cls: 
         t_str = t_cls.lstrip('0')
-        class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in t_kws]
+        class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in all_t]
+        
+    orig_c_clean = [k.lower().strip(".;, ") for k in orig_c]
+    orig_t_clean = [k.lower().strip(".;, ") for k in orig_t]
         
     filtered = []
-    score = 0
+    base_score = 0
+    c_has_orig_match = False
+    t_has_orig_match = False
     
     for match in segments:
         cls_num = match.group(1)
@@ -201,28 +200,39 @@ def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
                 c_lower = clause.lower().strip(".;, ")
                 matched_exact = False
                 matched_list = False
+                matched_kw = None
                 
                 for kw in kws:
                     if c_lower == kw:
                         matched_exact = True
+                        matched_kw = kw
                         break
                     sub_items = [x.strip(".;, ") for x in c_lower.split(',')]
                     if kw in sub_items:
                         matched_list = True
+                        matched_kw = kw
                         break
                         
                 if matched_exact:
                     exact_matches.append(clause)
-                    score += 100 
+                    base_score += 100 
                 elif matched_list:
                     exact_matches.append(clause)
-                    score += 50  
+                    base_score += 50  
                 else:
                     for kw in kws:
                         if re.search(rf'\b{re.escape(kw)}\b', c_lower):
                             partial_matches.append(clause)
-                            score += 10 
+                            base_score += 10 
+                            matched_kw = kw
                             break
+                            
+                # Check if the matched keyword is from the ORIGINAL Step 2 list
+                if matched_kw:
+                    if matched_kw in orig_c_clean:
+                        c_has_orig_match = True
+                    if matched_kw in orig_t_clean:
+                        t_has_orig_match = True
                             
             if exact_matches:
                 display_desc = exact_matches[0] 
@@ -233,9 +243,18 @@ def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
                 
             filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
             
-    return "\n | ".join(filtered) if filtered else "", score
+    # Apply Tier Bonus based on Original Term matches
+    tier_bonus = 0
+    if c_has_orig_match and t_has_orig_match:
+        tier_bonus = 1000000  # Tier 1: Both original
+    elif c_has_orig_match or t_has_orig_match:
+        tier_bonus = 100000   # Tier 2: One original, one expanded
+        
+    total_score = base_score + tier_bonus
+            
+    return "\n | ".join(filtered) if filtered else "", total_score
 
-def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
+def process_uspto_excel_results(excel_out, c_class, t_class, all_c, all_t, orig_c, orig_t):
     """Reads raw Excel file from scrape_uspto, filters live registrations, scores matches, and builds DF."""
     if not os.path.exists(excel_out):
         return pd.DataFrame()
@@ -272,7 +291,7 @@ def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
     ui_df['Status'] = raw_df[status_col].astype(str) if status_col else "Live"
     ui_df['Raw Goods'] = raw_df[goods_col].astype(str)
     
-    applied = ui_df['Raw Goods'].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
+    applied = ui_df['Raw Goods'].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, all_c, all_t, orig_c, orig_t))
     ui_df['Filtered Goods'] = applied.apply(lambda x: x[0])
     ui_df['MatchScore'] = applied.apply(lambda x: x[1])
     
@@ -396,7 +415,7 @@ def run():
                 st.error(f"Error scraping USPTO: {e}")
                 st.stop()
                 
-            ui_df = process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean)
+            ui_df = process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean, c_clean, t_clean)
             
             if ui_df.empty:
                 st.warning(f"No bridging registrations found for query: `{search_query}`. Try checking different keyword boxes.")
@@ -429,8 +448,11 @@ def run():
                 
                 # Fetch dynamically related terms based on the user's checked keywords
                 term_clusters = load_expansion_clusters()
-                suggested_c_terms = get_suggestions(st.session_state.get('primary_c_kws', []), term_clusters)
-                suggested_t_terms = get_suggestions(st.session_state.get('primary_t_kws', []), term_clusters)
+                orig_c = st.session_state.get('primary_c_kws', [])
+                orig_t = st.session_state.get('primary_t_kws', [])
+                
+                suggested_c_terms = get_suggestions(orig_c, term_clusters)
+                suggested_t_terms = get_suggestions(orig_t, term_clusters)
                 
                 exp_col1, exp_col2 = st.columns(2)
                 with exp_col1:
@@ -455,8 +477,8 @@ def run():
 
                 if st.button("🚀 Run Expanded Search", type="secondary"):
                     # Combine original and new terms
-                    c_clean = list(st.session_state.get('primary_c_kws', []))
-                    t_clean = list(st.session_state.get('primary_t_kws', []))
+                    c_clean = list(orig_c)
+                    t_clean = list(orig_t)
                     
                     if suggested_c_terms: c_clean.extend(add_c_terms)
                     if custom_c.strip(): c_clean.extend([x.strip() for x in custom_c.split(',') if x.strip()])
@@ -484,7 +506,8 @@ def run():
                             st.error(f"Error during expanded search: {e}")
                             st.stop()
                             
-                        exp_df = process_uspto_excel_results(excel_exp_out, raw_c, raw_t, c_clean, t_clean)
+                        # Pass the original keywords to the processor so it can calculate the Tier Bonuses correctly!
+                        exp_df = process_uspto_excel_results(excel_exp_out, raw_c, raw_t, c_clean, t_clean, orig_c, orig_t)
                         
                         if exp_df.empty:
                             st.warning("No additional registrations found with expanded terms.")
@@ -492,6 +515,7 @@ def run():
                             # Merge with existing results if any existed
                             if not df.empty:
                                 combined = pd.concat([df, exp_df.drop(columns=['Raw Goods', 'MatchScore'])], ignore_index=True)
+                                # Deduplicate by Registration Number
                                 combined = combined.drop_duplicates(subset=['Reg Number'], keep='first').reset_index(drop=True)
                                 st.session_state['bridging_results'] = combined
                             else:
