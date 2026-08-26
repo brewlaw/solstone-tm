@@ -244,6 +244,15 @@ def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
   ui_df["MatchScore"] = applied.apply(lambda x: x[1])
 
   ui_df = ui_df[ui_df["Filtered Goods"] != ""]
+
+  # STRICT OWNER DEDUPLICATION: Ensures no owner appears on multiple lines
+  ui_df["Owner_Clean"] = ui_df["Owner"].astype(str).str.upper().str.strip()
+  ui_df = (
+      ui_df.drop_duplicates(subset=["Owner_Clean"], keep="first")
+      .drop(columns=["Owner_Clean"])
+      .reset_index(drop=True)
+  )
+
   return ui_df
 
 
@@ -347,157 +356,98 @@ def generate_exhibit_cover_pdf(selected_df):
 
 
 # ==========================================
-# 4. HELPER: AUTOMATED TSDR PDF FETCH & STITCH
+# 4. HELPER: AUTOMATED TSDR PDF DOWNLOAD VIA PLAYWRIGHT
 # ==========================================
-def get_tsdr_pdf_bytes(row):
-  """Attempts to download the official TSDR Status PDF directly from USPTO.
+def download_official_tsdr_pdfs_batch(selected_df):
+  """Automates Playwright to open TSDR for each mark, click 'Download > Status (PDF)', and capture the official USPTO PDF printout."""
+  pdf_dict = {}
 
-  If endpoint access is restricted, generates an official-formatted ReportLab
-  TSDR Status Document Sheet.
-  """
-  reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
-  sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
-
-  id_str = f"rn{reg_num}" if reg_num and reg_num.lower() != "nan" else f"sn{sn_num}"
-  url = f"https://tsdrapi.uspto.gov/ts/cd/casestatus/{id_str}/content.pdf"
-
-  try:
-    resp = requests.get(
-        url, timeout=5, headers={"User-Agent": "Mozilla/5.0"}
+  with sync_playwright() as p:
+    browser = p.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+        ],
     )
-    if (
-        resp.status_code == 200
-        and len(resp.content) > 1000
-        and resp.content.startswith(b"%PDF")
-    ):
-      return resp.content
-  except Exception:
-    pass
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1920, "height": 1080},
+    )
+    page = context.new_page()
 
-  # Fallback: Generate single-page official TSDR Status Sheet via ReportLab
-  buffer = BytesIO()
-  doc = SimpleDocTemplate(
-      buffer,
-      pagesize=letter,
-      rightMargin=36,
-      leftMargin=36,
-      topMargin=36,
-      bottomMargin=36,
-  )
-  elements = []
-  styles = getSampleStyleSheet()
-
-  title_style = ParagraphStyle(
-      "TsdrHead",
-      parent=styles["Heading1"],
-      fontSize=12,
-      leading=15,
-      textColor=colors.HexColor("#1E3A8A"),
-  )
-  sub_style = ParagraphStyle(
-      "TsdrSub",
-      parent=styles["Normal"],
-      fontSize=8.5,
-      leading=11,
-      textColor=colors.HexColor("#475569"),
-  )
-  lbl_style = ParagraphStyle(
-      "TsdrLbl",
-      parent=styles["Normal"],
-      fontSize=8.5,
-      leading=11,
-      fontName="Helvetica-Bold",
-  )
-  val_style = ParagraphStyle(
-      "TsdrVal", parent=styles["Normal"], fontSize=8.5, leading=11
-  )
-
-  elements.append(
-      Paragraph(
-          "<b>UNITED STATES PATENT AND TRADEMARK OFFICE</b>", title_style
+    for idx, (_, row) in enumerate(selected_df.iterrows()):
+      reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+      sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+      num_to_use = (
+          reg_num
+          if reg_num and reg_num.lower() != "nan" and reg_num != ""
+          else sn_num
       )
-  )
-  elements.append(
-      Paragraph(
-          "Trademark Status & Document Retrieval (TSDR) — Official Status"
-          " Printout",
-          sub_style,
-      )
-  )
-  elements.append(Spacer(1, 10))
 
-  data = [
-      [
-          Paragraph("Word Mark", lbl_style),
-          Paragraph(f"<b>{row.get('Mark', '')}</b>", val_style),
-      ],
-      [
-          Paragraph("US Registration Number", lbl_style),
-          Paragraph(str(row.get("Reg Number", "")), val_style),
-      ],
-      [
-          Paragraph("US Serial Number", lbl_style),
-          Paragraph(str(row.get("Serial", "")), val_style),
-      ],
-      [
-          Paragraph("Current Status", lbl_style),
-          Paragraph(
-              f"<b>{row.get('Status', 'REGISTERED')}</b> — Live / Registered"
-              " on Principal Register",
-              val_style,
-          ),
-      ],
-      [
-          Paragraph("Filing / Register Basis", lbl_style),
-          Paragraph("Section 1(a) — Active Commercial Use", val_style),
-      ],
-      [
-          Paragraph("Owner / Registrant", lbl_style),
-          Paragraph(str(row.get("Owner", "")), val_style),
-      ],
-      [
-          Paragraph("Goods and Services", lbl_style),
-          Paragraph(str(row.get("Filtered Goods", "")), val_style),
-      ],
-  ]
+      if not num_to_use or num_to_use.lower() == "nan":
+        continue
 
-  t = Table(data, colWidths=[140, 400])
-  t.setStyle(
-      TableStyle([
-          ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F8FAFC")),
-          ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-          ("VALIGN", (0, 0), (-1, -1), "TOP"),
-          ("TOPPADDING", (0, 0), (-1, -1), 6),
-          ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-      ])
-  )
-  elements.append(t)
-  doc.build(elements)
-  buffer.seek(0)
-  return buffer.getvalue()
+      try:
+        url = (
+            f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+        )
+        page.goto(url, timeout=30000)
 
+        # Wait for TSDR page to fully render
+        page.wait_for_function(
+            "() => document.body.innerText.includes('Mark:') ||"
+            " document.body.innerText.includes('US Serial Number:')",
+            timeout=15000,
+        )
+        page.wait_for_timeout(1000)
 
-def generate_automated_exhibit_package(selected_df):
-  """Generates Cover Page + Master Index and automatically downloads/attaches each TSDR Status PDF into a single combined package."""
-  writer = PdfWriter()
+        # 1. Click main 'Download' dropdown toggle button
+        download_menu = page.locator("a, button, div").filter(
+            has_text=re.compile(r"^Download$", re.IGNORECASE)
+        ).first
+        if not download_menu.is_visible():
+          download_menu = page.get_by_text("Download").first
 
-  # 1. Add Cover Page & Master Index
-  cover_buffer = generate_exhibit_cover_pdf(selected_df)
-  cover_reader = PdfReader(cover_buffer)
-  for page in cover_reader.pages:
-    writer.add_page(page)
+        download_menu.click()
+        page.wait_for_timeout(500)
 
-  # 2. Fetch/Generate & Attach TSDR PDF for each selected registration
-  for _, row in selected_df.iterrows():
-    pdf_bytes = get_tsdr_pdf_bytes(row)
-    reader = PdfReader(BytesIO(pdf_bytes))
-    for page in reader.pages:
-      writer.add_page(page)
+        # 2. Click inner blue 'Download' button inside popup and catch the file download
+        with page.expect_download(timeout=15000) as download_info:
+          action_btn = page.locator("a, button, input").filter(
+              has_text=re.compile(r"Download", re.IGNORECASE)
+          ).last
+          action_btn.click()
 
-  output_buffer = BytesIO()
-  writer.write(output_buffer)
-  output_buffer.seek(0)
-  return output_buffer
+        download = download_info.value
+        tmp_path = download.path()
+        with open(tmp_path, "rb") as f:
+          pdf_bytes = f.read()
+
+        if pdf_bytes and len(pdf_bytes) > 1000:
+          pdf_dict[num_to_use] = pdf_bytes
+      except Exception:
+        # Direct session endpoint fallback
+        try:
+          id_type = (
+              "rn"
+              if reg_num and reg_num.lower() != "nan" and reg_num != ""
+              else "sn"
+          )
+          api_url = f"https://tsdrapi.uspto.gov/ts/cd/casestatus/{id_type}{num_to_use}/content.pdf"
+          resp = page.request.get(api_url)
+          if resp.status == 200 and resp.body().startswith(b"%PDF"):
+            pdf_dict[num_to_use] = resp.body()
+        except Exception:
+          pass
+
+    browser.close()
+  return pdf_dict
 
 
 # ==========================================
@@ -812,7 +762,20 @@ def run():
                 combined = pd.concat([df, exp_df_clean], ignore_index=True)
                 combined = combined.drop_duplicates(
                     subset=["Reg Number"], keep="first"
-                ).reset_index(drop=True)
+                )
+
+                # DEDUPLICATE BY OWNER IN EXPANDED RESULTS
+                combined["Owner_Clean"] = (
+                    combined["Owner"].astype(str).str.upper().str.strip()
+                )
+                combined = (
+                    combined.drop_duplicates(
+                        subset=["Owner_Clean"], keep="first"
+                    )
+                    .drop(columns=["Owner_Clean"])
+                    .reset_index(drop=True)
+                )
+
                 if "Select" not in combined.columns:
                   combined.insert(0, "Select", False)
                 combined["Select"] = (
@@ -822,7 +785,18 @@ def run():
               else:
                 exp_df_sorted = exp_df_clean.sort_values(
                     by="MatchScore", ascending=False
-                ).reset_index(drop=True)
+                )
+                exp_df_sorted["Owner_Clean"] = (
+                    exp_df_sorted["Owner"].astype(str).str.upper().str.strip()
+                )
+                exp_df_sorted = (
+                    exp_df_sorted.drop_duplicates(
+                        subset=["Owner_Clean"], keep="first"
+                    )
+                    .drop(columns=["Owner_Clean"])
+                    .reset_index(drop=True)
+                )
+
                 if "Select" not in exp_df_sorted.columns:
                   exp_df_sorted.insert(0, "Select", False)
                 exp_df_sorted["Select"] = (
@@ -854,7 +828,7 @@ def run():
       )
       st.session_state["bridging_results"] = edited_df
 
-      # --- STEP 4: AUTOMATED EXPORT ---
+      # --- STEP 4: AUTOMATED EXPORT & STITCHING ---
       selected_rows = edited_df[edited_df["Select"] == True]
 
       st.divider()
@@ -871,14 +845,51 @@ def run():
             " Exhibit A."
         )
 
-        with st.spinner("Compiling Exhibit A Cover Page and TSDR Status Sheets..."):
-          combined_pdf_buffer = generate_automated_exhibit_package(selected_rows)
+        if st.button(
+            "📦 Generate & Download Official Exhibit A Package", type="primary"
+        ):
+          with st.spinner(
+              f"Navigating TSDR and downloading official status PDFs for"
+              f" {len(selected_rows)} mark(s)..."
+          ):
+            # 1. Download official status PDFs directly from TSDR using Playwright
+            pdf_dict = download_official_tsdr_pdfs_batch(selected_rows)
 
-        st.download_button(
-            label="📦 Download Complete Exhibit A Package (PDF)",
-            data=combined_pdf_buffer,
-            file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
-            mime="application/pdf",
-            type="primary",
-            use_container_width=True,
-        )
+            # 2. Build Cover Page + Master Index
+            cover_buffer = generate_exhibit_cover_pdf(selected_rows)
+
+            # 3. Stitch Cover Page and official TSDR PDFs together
+            writer = PdfWriter()
+            cover_reader = PdfReader(cover_buffer)
+            for page in cover_reader.pages:
+              writer.add_page(page)
+
+            for _, row in selected_rows.iterrows():
+              reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+              sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+              num_key = (
+                  reg_num
+                  if reg_num and reg_num.lower() != "nan" and reg_num != ""
+                  else sn_num
+              )
+
+              if num_key in pdf_dict:
+                tsdr_reader = PdfReader(BytesIO(pdf_dict[num_key]))
+                for page in tsdr_reader.pages:
+                  writer.add_page(page)
+
+            final_buffer = BytesIO()
+            writer.write(final_buffer)
+            final_buffer.seek(0)
+
+            st.session_state["exhibit_pdf_bytes"] = final_buffer.getvalue()
+
+        if "exhibit_pdf_bytes" in st.session_state:
+          st.download_button(
+              label="📄 Download Completed Exhibit A Package (PDF)",
+              data=st.session_state["exhibit_pdf_bytes"],
+              file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
+              mime="application/pdf",
+              type="primary",
+              use_container_width=True,
+          )
