@@ -23,6 +23,7 @@ tool = st.sidebar.radio(
         "Section 2(e) Risk Analyzer",
         "Letter of Protest Generator",
         "Cloud Report Archive"
+        "GOODS/SERVICES DESCRIPTION BUILDER"
     ]
 )
 
