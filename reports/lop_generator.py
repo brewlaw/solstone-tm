@@ -2,7 +2,6 @@ import os
 import re
 from io import BytesIO
 import pandas as pd
-import requests
 from playwright.sync_api import sync_playwright
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
@@ -72,13 +71,35 @@ DEFAULT_RELATED_TERMS = {
 # 0. HELPER: OWNER NAME NORMALIZATION
 # ==========================================
 def normalize_owner_name(owner_str):
-  """Strips entity types, parentheses, addresses, and punctuation to create a pure canonical key for owner deduplication."""
+  """Strips entity types, brackets, parentheses, addresses, and corporate suffixes
+
+  to create a canonical key for 100% owner deduplication.
+  """
   if not isinstance(owner_str, str) or not owner_str.strip():
     return ""
-  # Cut off at first parenthesis or semicolon (where entity details or addresses begin)
-  base_name = re.split(r"[\(;]", owner_str)[0]
-  # Strip all non-alphanumeric characters and convert to uppercase
-  return re.sub(r"[^A-Z0-9]", "", base_name.upper())
+  # Cut off at first bracket, parenthesis, semicolon, or comma
+  base_name = re.split(r"[\(\[\;\,]", owner_str)[0]
+  # Convert to uppercase and keep letters/digits only
+  clean = re.sub(r"[^A-Z0-9]", "", base_name.upper())
+
+  # Strip corporate entity suffixes
+  suffixes = [
+      "LIMITEDLIABILITYCOMPANY",
+      "LLC",
+      "INC",
+      "INCORPORATED",
+      "CORP",
+      "CORPORATION",
+      "LIMITED",
+      "LTD",
+      "COMPANY",
+      "CO",
+  ]
+  for s in suffixes:
+    if clean.endswith(s):
+      clean = clean[: -len(s)]
+      break
+  return clean
 
 
 # ==========================================
@@ -369,11 +390,12 @@ def generate_exhibit_cover_pdf(selected_df):
 
 
 # ==========================================
-# 4. HELPER: AUTOMATED TSDR PDF DOWNLOAD VIA PLAYWRIGHT
+# 4. HELPER: AUTOMATED OFFICIAL TSDR PDF DOWNLOAD VIA PLAYWRIGHT
 # ==========================================
 def download_official_tsdr_pdfs_batch(selected_df):
-  """Automates Playwright to open TSDR for each mark, click 'Download > Status (PDF)', and capture the official USPTO PDF printout."""
+  """Automates Playwright to open TSDR for each mark, fill search box, click 'Download > Status (PDF)', and capture the official USPTO PDF stream."""
   pdf_dict = {}
+  errors = []
 
   with sync_playwright() as p:
     browser = p.chromium.launch(
@@ -407,56 +429,42 @@ def download_official_tsdr_pdfs_batch(selected_df):
         continue
 
       try:
-        url = (
-            f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-        )
-        page.goto(url, timeout=30000)
+        page.goto("https://tsdr.uspto.gov/", timeout=30000)
+        page.wait_for_selector("#searchNumber", timeout=15000)
+        page.fill("#searchNumber", str(num_to_use))
+        page.press("#searchNumber", "Enter")
 
-        page.wait_for_function(
-            "() => document.body.innerText.includes('Mark:') ||"
-            " document.body.innerText.includes('US Serial Number:')",
-            timeout=15000,
-        )
+        # Wait for status page to load
+        page.wait_for_selector("text=Generated on:", timeout=20000)
         page.wait_for_timeout(1000)
 
-        download_menu = page.locator("a, button, div").filter(
-            has_text=re.compile(r"^Download$", re.IGNORECASE)
-        ).first
-        if not download_menu.is_visible():
-          download_menu = page.get_by_text("Download").first
-
+        # Open top-level 'Download' dropdown
+        download_menu = page.locator("a:has-text('Download')").first
         download_menu.click()
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(800)
 
-        with page.expect_download(timeout=15000) as download_info:
-          action_btn = page.locator("a, button, input").filter(
-              has_text=re.compile(r"Download", re.IGNORECASE)
-          ).last
-          action_btn.click()
+        # Catch PDF download stream when clicking the inner Download button
+        with page.expect_download(timeout=20000) as download_info:
+          inner_download_btn = page.locator("a:has-text('Download')").last
+          inner_download_btn.click()
 
         download = download_info.value
         tmp_path = download.path()
         with open(tmp_path, "rb") as f:
           pdf_bytes = f.read()
 
-        if pdf_bytes and len(pdf_bytes) > 1000:
+        if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
           pdf_dict[num_to_use] = pdf_bytes
-      except Exception:
-        try:
-          id_type = (
-              "rn"
-              if reg_num and reg_num.lower() != "nan" and reg_num != ""
-              else "sn"
+        else:
+          errors.append(
+              f"Reg #{num_to_use}: Invalid PDF response from TSDR server."
           )
-          api_url = f"https://tsdrapi.uspto.gov/ts/cd/casestatus/{id_type}{num_to_use}/content.pdf"
-          resp = page.request.get(api_url)
-          if resp.status == 200 and resp.body().startswith(b"%PDF"):
-            pdf_dict[num_to_use] = resp.body()
-        except Exception:
-          pass
+
+      except Exception as e:
+        errors.append(f"Reg #{num_to_use}: {str(e)}")
 
     browser.close()
-  return pdf_dict
+  return pdf_dict, errors
 
 
 # ==========================================
@@ -636,7 +644,7 @@ def run():
 
     df = st.session_state.get("bridging_results", pd.DataFrame())
     if not df.empty:
-      # ALWAYS DEDUPLICATE BY NORMALIZED OWNER IN STEP 3 VIEW
+      # STRICT DEDUPLICATION BY CANONICAL OWNER KEY
       df["Owner_Key"] = df["Owner"].apply(normalize_owner_name)
       df = (
           df.drop_duplicates(subset=["Owner_Key"], keep="first")
@@ -780,7 +788,7 @@ def run():
                     subset=["Reg Number"], keep="first"
                 )
 
-                # DEDUPLICATE COMBINED RESULTS BY NORMALIZED OWNER KEY
+                # DEDUPLICATE COMBINED RESULTS BY CANONICAL OWNER KEY
                 combined["Owner_Key"] = combined["Owner"].apply(
                     normalize_owner_name
                 )
@@ -844,7 +852,7 @@ def run():
       )
       st.session_state["bridging_results"] = edited_df
 
-      # --- STEP 4: AUTOMATED EXPORT & STITCHING ---
+      # --- STEP 4: AUTOMATED OFFICIAL PDF EXPORT & STITCHING ---
       selected_rows = edited_df[edited_df["Select"] == True]
 
       st.divider()
@@ -865,10 +873,19 @@ def run():
             "📦 Generate & Download Official Exhibit A Package", type="primary"
         ):
           with st.spinner(
-              f"Navigating TSDR and downloading official status PDFs for"
+              f"Fetching official TSDR status PDFs from USPTO for"
               f" {len(selected_rows)} mark(s)..."
           ):
-            pdf_dict = download_official_tsdr_pdfs_batch(selected_rows)
+            pdf_dict, errors = download_official_tsdr_pdfs_batch(selected_rows)
+
+            if errors:
+              st.warning(
+                  "⚠️ The following TSDR PDFs could not be downloaded"
+                  " automatically (likely due to Akamai security restrictions"
+                  " on cloud server IPs):"
+              )
+              for err in errors:
+                st.write(f"- `{err}`")
 
             cover_buffer = generate_exhibit_cover_pdf(selected_rows)
 
@@ -877,6 +894,7 @@ def run():
             for page in cover_reader.pages:
               writer.add_page(page)
 
+            attached_count = 0
             for _, row in selected_rows.iterrows():
               reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
               sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
@@ -890,19 +908,86 @@ def run():
                 tsdr_reader = PdfReader(BytesIO(pdf_dict[num_key]))
                 for page in tsdr_reader.pages:
                   writer.add_page(page)
+                attached_count += 1
 
             final_buffer = BytesIO()
             writer.write(final_buffer)
             final_buffer.seek(0)
 
             st.session_state["exhibit_pdf_bytes"] = final_buffer.getvalue()
+            st.session_state["attached_count"] = attached_count
 
         if "exhibit_pdf_bytes" in st.session_state:
           st.download_button(
-              label="📄 Download Completed Exhibit A Package (PDF)",
+              label=(
+                  "📄 Download Completed Exhibit A Package"
+                  f" ({st.session_state.get('attached_count', 0)} Official"
+                  " TSDR PDFs Attached)"
+              ),
               data=st.session_state["exhibit_pdf_bytes"],
               file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
               mime="application/pdf",
               type="primary",
               use_container_width=True,
           )
+
+          st.divider()
+          st.markdown("#### Manual TSDR Attachment Fallback (If Needed)")
+          st.write(
+              "If any marks failed to download automatically above, click below"
+              " to save them directly from TSDR and upload to stitch:"
+          )
+
+          link_cols = st.columns(2)
+          for idx, (_, row) in enumerate(selected_rows.iterrows()):
+            reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+            sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+            num_to_use = (
+                reg_num
+                if reg_num and reg_num.lower() != "nan" and reg_num != ""
+                else sn_num
+            )
+            mark_txt = str(row.get("Mark", "Unknown"))
+
+            tsdr_url = (
+                f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+            )
+            col_target = link_cols[0] if idx % 2 == 0 else link_cols[1]
+            col_target.markdown(
+                f"🔗 **[{idx+1}. {mark_txt} (Reg #{num_to_use})]({tsdr_url})**"
+            )
+
+          uploaded_tsdr_files = st.file_uploader(
+              "Upload manually downloaded TSDR Status PDFs to re-stitch:",
+              type=["pdf"],
+              accept_multiple_files=True,
+              key="manual_tsdr_uploader",
+          )
+
+          if uploaded_tsdr_files:
+            writer = PdfWriter()
+            cover_buffer = generate_exhibit_cover_pdf(selected_rows)
+            cover_reader = PdfReader(cover_buffer)
+            for page in cover_reader.pages:
+              writer.add_page(page)
+
+            for u_file in uploaded_tsdr_files:
+              reader = PdfReader(u_file)
+              for page in reader.pages:
+                writer.add_page(page)
+
+            restitched_buffer = BytesIO()
+            writer.write(restitched_buffer)
+            restitched_buffer.seek(0)
+
+            st.download_button(
+                label=(
+                    "📦 Download Re-Stitched Exhibit A Package"
+                    f" ({len(uploaded_tsdr_files)} Uploaded PDFs Attached)"
+                ),
+                data=restitched_buffer.getvalue(),
+                file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
