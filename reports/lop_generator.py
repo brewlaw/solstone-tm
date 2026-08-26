@@ -529,6 +529,9 @@ def run():
             drop=True
         )
         ui_df_clean = ui_df.drop(columns=["Raw Goods", "MatchScore"])
+        if "Select" not in ui_df_clean.columns:
+          ui_df_clean.insert(0, "Select", False)
+        ui_df_clean["Select"] = ui_df_clean["Select"].fillna(False).astype(bool)
         st.session_state["bridging_results"] = ui_df_clean
 
       st.session_state["lop_step"] = 3
@@ -540,6 +543,12 @@ def run():
     st.markdown("### Step 3: Select Evidence")
 
     df = st.session_state.get("bridging_results", pd.DataFrame())
+    if not df.empty:
+      if "Select" not in df.columns:
+        df.insert(0, "Select", False)
+      df["Select"] = df["Select"].fillna(False).astype(bool)
+      st.session_state["bridging_results"] = df
+
     results_count = len(df)
 
     if results_count < 10:
@@ -557,14 +566,24 @@ def run():
             " search:"
         )
 
-        raw_c = st.session_state.get("client_class", "").strip().zfill(3)
-        raw_t = st.session_state.get("applicant_class", "").strip().zfill(3)
+        raw_c = (
+            st.session_state.get("client_class", "")
+            .strip()
+            .lstrip("0")
+            .zfill(3)
+        )
+        raw_t = (
+            st.session_state.get("applicant_class", "")
+            .strip()
+            .lstrip("0")
+            .zfill(3)
+        )
 
         default_c_terms = DEFAULT_RELATED_TERMS.get(
-            raw_c.lstrip("0"), ["goods", "products"]
+            raw_c, ["goods", "products"]
         )
         default_t_terms = DEFAULT_RELATED_TERMS.get(
-            raw_t.lstrip("0"), ["services", "providing services"]
+            raw_t, ["services", "providing services"]
         )
 
         exp_col1, exp_col2 = st.columns(2)
@@ -655,22 +674,28 @@ def run():
             if exp_df.empty:
               st.warning("No additional registrations found with expanded terms.")
             else:
+              exp_df_clean = exp_df.drop(columns=["Raw Goods", "MatchScore"])
               if not df.empty:
-                combined = pd.concat(
-                    [df, exp_df.drop(columns=["Raw Goods", "MatchScore"])],
-                    ignore_index=True,
-                )
+                combined = pd.concat([df, exp_df_clean], ignore_index=True)
                 combined = combined.drop_duplicates(
                     subset=["Reg Number"], keep="first"
                 ).reset_index(drop=True)
+                if "Select" not in combined.columns:
+                  combined.insert(0, "Select", False)
+                combined["Select"] = (
+                    combined["Select"].fillna(False).astype(bool)
+                )
                 st.session_state["bridging_results"] = combined
               else:
-                exp_df = exp_df.sort_values(
+                exp_df_sorted = exp_df_clean.sort_values(
                     by="MatchScore", ascending=False
                 ).reset_index(drop=True)
-                st.session_state["bridging_results"] = exp_df.drop(
-                    columns=["Raw Goods", "MatchScore"]
+                if "Select" not in exp_df_sorted.columns:
+                  exp_df_sorted.insert(0, "Select", False)
+                exp_df_sorted["Select"] = (
+                    exp_df_sorted["Select"].fillna(False).astype(bool)
                 )
+                st.session_state["bridging_results"] = exp_df_sorted
 
               st.success(
                   "Updated results! Total registrations found:"
@@ -680,9 +705,6 @@ def run():
 
     if not df.empty:
       st.write("Select the best records below to include in your Exhibit A.")
-
-      if "Select" not in df.columns:
-        df.insert(0, "Select", False)
 
       edited_df = st.data_editor(
           df,
@@ -697,6 +719,7 @@ def run():
               ),
           },
       )
+      st.session_state["bridging_results"] = edited_df
 
       # --- STEP 4: EXPORT EXHIBIT A PACKAGE ---
       selected_rows = edited_df[edited_df["Select"] == True]
