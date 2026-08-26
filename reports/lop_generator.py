@@ -37,6 +37,9 @@ def parse_goods_to_df(raw_goods):
 # ==========================================
 # 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
+# ==========================================
+# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
+# ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
     """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
     if not serial_number: return None, None
@@ -65,50 +68,67 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
+                # Wait for either DIVs (old layout) or TDs (new layout)
                 try:
-                    page.wait_for_selector("div.value", state="attached", timeout=15000)
+                    page.wait_for_selector("div.value, td.value", state="attached", timeout=15000)
                 except:
                     try:
                         page.locator('#searchNumber').fill(serial_number)
                         page.locator('#searchNumber').press("Enter")
-                        page.wait_for_selector("div.value", state="attached", timeout=15000)
+                        page.wait_for_selector("div.value, td.value", state="attached", timeout=15000)
                     except:
                         pass 
                     
                 page.wait_for_timeout(2000) 
+
+                # SAFE EXPAND: Click 'Expand All' if the goods are hidden (fixes the 99760423 bug)
+                try:
+                    expand_btn = page.locator("text='Expand All'").first
+                    if expand_btn.is_visible(timeout=2000):
+                        expand_btn.click(force=True)
+                        page.wait_for_timeout(1000)
+                except:
+                    pass
                 
                 if "Access Denied" in page.content():
                     browser.close()
                     raise Exception("USPTO Firewall Blocked the Connection.")
 
+                # DUAL-LAYOUT JS: Parses both the old DIVs and the new TABLEs seamlessly
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
-                    let keys = document.querySelectorAll('div.key');
-                    for (let k of keys) {
-                        let text = k.textContent.trim();
-                        if (text === 'Mark:' || text === 'Word Mark:') {
-                            let val = k.nextElementSibling;
-                            if (val && val.classList.contains('value')) {
-                                markName = val.textContent.trim();
-                                break;
+                    
+                    let elements = document.querySelectorAll('.key, .label, th, td');
+                    for (let el of elements) {
+                        let text = el.textContent.trim().replace(/:/g, '');
+                        
+                        // 1. Get Mark Name (ignoring the 'Ser No' search UI)
+                        if (text === 'Mark' || text === 'Word Mark') {
+                            let nextNode = el.nextElementSibling || el.nextSibling;
+                            if (nextNode) {
+                                let val = nextNode.textContent.trim();
+                                if (val && !val.includes("Ser No")) {
+                                    markName = val;
+                                }
                             }
                         }
-                    }
-                    let rows = document.querySelectorAll('div.row');
-                    for (let row of rows) {
-                        let keyNode = row.querySelector('div.key');
-                        let valNode = row.querySelector('div.value');
-                        if (keyNode && valNode) {
-                            if (keyNode.textContent.trim() === 'For:') {
-                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
+                        
+                        // 2. Get Goods
+                        if (text === 'For') {
+                            let nextNode = el.nextElementSibling || el.nextSibling;
+                            if (nextNode) {
+                                let cleanGoods = nextNode.textContent.replace(/\\s+/g, ' ').trim();
                                 if (cleanGoods) {
                                     goodsArray.push(cleanGoods);
                                 }
                             }
                         }
                     }
+                    
+                    goodsArray = [...new Set(goodsArray)]; // Deduplicate just in case
+                    
                     return { 
                         mark: markName, 
                         goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
@@ -122,8 +142,11 @@ def fetch_tsdr_data(serial_number, target_classes):
                 
                 browser.close()
                 
-                if mark_name == "Unknown Mark":
+                if mark_name == "Unknown Mark" and "Goods boundaries not found" in goods_text:
                     raise Exception("Page loaded but data was missing. Retrying...")
+                    
+                if mark_name == "Unknown Mark":
+                    mark_name = "[Design Mark / Unlabeled]"
                     
                 return mark_name, goods_text
                 
