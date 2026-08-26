@@ -93,20 +93,19 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
-                # The original bulletproof wait logic
                 try:
-                    page.wait_for_selector("div.value", state="attached", timeout=15000)
+                    page.wait_for_selector("div.value, td.value, td, th", state="attached", timeout=15000)
                 except:
                     try:
                         page.locator('#searchNumber').fill(serial_number)
                         page.locator('#searchNumber').press("Enter")
-                        page.wait_for_selector("div.value", state="attached", timeout=15000)
+                        page.wait_for_selector("div.value, td.value, td, th", state="attached", timeout=15000)
                     except:
                         pass 
                     
                 page.wait_for_timeout(2000) 
 
-                # SAFE EXPAND: Soft click to reveal hidden goods. Fails silently without breaking the script.
+                # SAFE EXPAND: Soft click to reveal hidden goods in the new TSDR layout.
                 try:
                     expand_btn = page.locator("text='Expand All'").first
                     if expand_btn.is_visible(timeout=2000):
@@ -119,38 +118,44 @@ def fetch_tsdr_data(serial_number, target_classes):
                     browser.close()
                     raise Exception("USPTO Firewall Blocked the Connection.")
 
-                # RESTORED: The original, perfect Javascript extraction logic
+                # DUAL-LAYOUT EXTRACTION: Safely parses both old DIVs and new TABLEs
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    let keys = document.querySelectorAll('div.key');
-                    for (let k of keys) {
-                        let text = k.textContent.trim();
+                    // Grab all possible label containers (divs for old layout, th/td for new layout)
+                    let labels = document.querySelectorAll('div.key, th, td');
+                    
+                    for (let el of labels) {
+                        let text = el.textContent.trim();
+                        
+                        // 1. Get the Mark Name
                         if (text === 'Mark:' || text === 'Word Mark:') {
-                            let val = k.nextElementSibling;
-                            if (val && val.classList.contains('value')) {
-                                markName = val.textContent.trim();
-                                break;
+                            let nextEl = el.nextElementSibling;
+                            if (nextEl) {
+                                let val = nextEl.textContent.trim();
+                                // Ensure it didn't grab the top search bar UI by accident
+                                if (val && !val.includes("Ser No")) {
+                                    markName = val;
+                                }
                             }
                         }
-                    }
-                    
-                    let rows = document.querySelectorAll('div.row');
-                    for (let row of rows) {
-                        let keyNode = row.querySelector('div.key');
-                        let valNode = row.querySelector('div.value');
                         
-                        if (keyNode && valNode) {
-                            if (keyNode.textContent.trim() === 'For:') {
-                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
-                                if (cleanGoods) {
-                                    goodsArray.push(cleanGoods);
+                        // 2. Get the Goods
+                        if (text === 'For:') {
+                            let nextEl = el.nextElementSibling;
+                            if (nextEl) {
+                                let val = nextEl.textContent.trim().replace(/\\s+/g, ' ');
+                                if (val) {
+                                    goodsArray.push(val);
                                 }
                             }
                         }
                     }
+                    
+                    // Deduplicate in case the new layout lists the goods twice
+                    goodsArray = [...new Set(goodsArray)];
                     
                     return { 
                         mark: markName, 
