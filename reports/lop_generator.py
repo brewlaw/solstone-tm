@@ -425,34 +425,28 @@ def download_official_tsdr_pdfs_batch(selected_df):
           continue
 
         try:
-          # 1. Direct navigate to TSDR case URL
-          tsdr_url = f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-          page.goto(tsdr_url, timeout=25000)
+          
+            # 1. Open TSDR page
+            tsdr_url = f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+            page.goto(tsdr_url, timeout=25000)
 
-          # 2. Wait up to 15s for TSDR dynamic content rendering
-          page.wait_for_selector("text=Generated on:", timeout=15000)
-          page.wait_for_timeout(1000)
+            # 2. Wait for status content to load
+            page.wait_for_selector("a[data-event-label='DownloadContentBtn']", timeout=15000)
 
-          # 3. Click the main "Download" dropdown button
-          download_menu = page.locator(
-              "a:has-text('Download'), button:has-text('Download')"
-          ).first
-          download_menu.click()
-          page.wait_for_timeout(600)
+            # 3. Click the exact dropdown header link
+            page.click("a[data-event-label='DownloadContentBtn']")
+            page.wait_for_timeout(500)
 
-          # 4. Trigger download event and capture PDF bytes
-          with page.expect_download(timeout=15000) as download_info:
-            inner_download_btn = page.locator(
-                "a:has-text('Download'), input[value='Download']"
-            ).last
-            inner_download_btn.click()
+            # 4. Click the exact button ID to download the PDF
+            with page.expect_download(timeout=15000) as download_info:
+            page.click("#downloadSubmit")
 
-          download = download_info.value
-          with open(download.path(), "rb") as f:
-            pdf_bytes = f.read()
+            download = download_info.value
+            with open(download.path(), "rb") as f:
+                pdf_bytes = f.read()
 
-          if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-            pdf_dict[num_to_use] = pdf_bytes
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                pdf_dict[num_to_use] = pdf_bytes
           else:
             errors.append(
                 f"Reg #{num_to_use}: Captured file was not a valid PDF."
