@@ -43,23 +43,104 @@ def get_suggestions(keywords, clusters):
     return sorted(list(suggestions))
 
 # ==========================================
-# 2. HELPER: PARSE GOODS INTO CHECKLIST
+# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
-def parse_goods_to_df(raw_goods):
-    """Splits raw goods text by semicolons/newlines into a DataFrame for the checklist UI."""
-    if not raw_goods or "Goods boundaries not found" in raw_goods:
-        return pd.DataFrame({"Select": [False], "Keyword": [raw_goods]})
-    
-    raw_items = re.split(r'[;\n]', raw_goods)
-    cleaned_items = [item.strip() for item in raw_items if item.strip()]
-            
-    seen = set()
-    unique_items = [x for x in cleaned_items if not (x in seen or seen.add(x))]
-    
-    if not unique_items:
-        return pd.DataFrame({"Select": [], "Keyword": []})
+def fetch_tsdr_data(serial_number, target_classes):
+    """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
+    if not serial_number: return None, None
         
-    return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox', 
+                        '--disable-dev-shm-usage', 
+                        '--disable-gpu', 
+                        '--disable-blink-features=AutomationControlled'
+                    ]
+                )
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1920, "height": 1080},
+                    java_script_enabled=True
+                )
+                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                page = context.new_page()
+                
+                url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+                page.goto(url, timeout=30000)
+                
+                try:
+                    page.wait_for_selector("div.value", state="attached", timeout=15000)
+                except:
+                    try:
+                        page.locator('#searchNumber').fill(serial_number)
+                        page.locator('#searchNumber').press("Enter")
+                        page.wait_for_selector("div.value", state="attached", timeout=15000)
+                    except:
+                        pass 
+                    
+                page.wait_for_timeout(2000) 
+                
+                if "Access Denied" in page.content():
+                    browser.close()
+                    raise Exception("USPTO Firewall Blocked the Connection.")
+
+                js_extract = """
+                () => {
+                    let markName = "Unknown Mark";
+                    let goodsArray = [];
+                    let keys = document.querySelectorAll('div.key');
+                    for (let k of keys) {
+                        let text = k.textContent.trim();
+                        if (text === 'Mark:' || text === 'Word Mark:') {
+                            let val = k.nextElementSibling;
+                            if (val && val.classList.contains('value')) {
+                                markName = val.textContent.trim();
+                                break;
+                            }
+                        }
+                    }
+                    let rows = document.querySelectorAll('div.row');
+                    for (let row of rows) {
+                        let keyNode = row.querySelector('div.key');
+                        let valNode = row.querySelector('div.value');
+                        if (keyNode && valNode) {
+                            if (keyNode.textContent.trim() === 'For:') {
+                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
+                                if (cleanGoods) {
+                                    goodsArray.push(cleanGoods);
+                                }
+                            }
+                        }
+                    }
+                    return { 
+                        mark: markName, 
+                        goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
+                    };
+                }
+                """
+                
+                result = page.evaluate(js_extract)
+                mark_name = result.get('mark', 'Unknown Mark')
+                goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
+                
+                browser.close()
+                
+                if mark_name == "Unknown Mark":
+                    raise Exception("Page loaded but data was missing. Retrying...")
+                    
+                return mark_name, goods_text
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            else:
+                return None, f"Error fetching data after 3 attempts: {str(e)}"
 
 
 # ==========================================
