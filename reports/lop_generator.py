@@ -321,16 +321,18 @@ def run():
         app_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", key="applicant_class")
 
     if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Scraping Client Data (Browser 1 of 2)..."):
-            c_mark, c_goods = fetch_tsdr_data(client_sn, client_class)
+        with st.spinner("Searching TMSearch for Client Data (Browser 1 of 2)..."):
+            # Use the new function name and pass ONLY the serial number!
+            c_mark, c_goods = fetch_initial_data(client_sn)
             st.session_state['c_mark'] = c_mark
             st.session_state['c_goods_df'] = parse_goods_to_df(c_goods)
             
         gc.collect() 
         time.sleep(2) 
 
-        with st.spinner("Scraping Applicant Data (Browser 2 of 2)..."):
-            a_mark, a_goods = fetch_tsdr_data(app_sn, app_class)
+        with st.spinner("Searching TMSearch for Applicant Data (Browser 2 of 2)..."):
+            # Use the new function name and pass ONLY the serial number!
+            a_mark, a_goods = fetch_initial_data(app_sn)
             st.session_state['a_mark'] = a_mark
             st.session_state['a_goods_df'] = parse_goods_to_df(a_goods)
             
