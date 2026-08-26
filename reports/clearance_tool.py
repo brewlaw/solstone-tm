@@ -1,223 +1,306 @@
+import datetime
+import gc
 import os
 import re
-import gc
-import datetime
-import streamlit as st
 from playwright.sync_api import sync_playwright
+import streamlit as st
 
-from scrapers.uspto_scraper import scrape_uspto
-from scrapers.ttb_scraper import scrape_ttb
-from scrapers.google_scraper import scrape_google
+from reports.docx_generator_2 import generate_docx_2
 from reports.pdf_generator import generate_pdf
-from reports.docx_generator_2 import generate_docx_2 
+from scrapers.google_scraper import scrape_google
+from scrapers.ttb_scraper import scrape_ttb
+from scrapers.uspto_scraper import scrape_uspto
 
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
+  os.makedirs(OUTPUT_DIR)
+
 
 def run():
-    st.header("Full Trademark Clearance Search")
-    st.write("Run a comprehensive, all-time clearance search across USPTO, TTB, and Google.")
+  st.header("Full Trademark Clearance Search")
+  st.write(
+      "Run a comprehensive, all-time clearance search across USPTO, TTB, and"
+      " Google."
+  )
 
-    if 'clearance_report_data' not in st.session_state:
-        st.session_state['clearance_report_data'] = None
+  if "clearance_report_data" not in st.session_state:
+    st.session_state["clearance_report_data"] = None
 
-    col1, col2 = st.columns(2)
-    # Insert this right before line 27:
-    def_client = st.session_state.get("client_name", "")
-    client_name = st.text_input("Client Name:", value=def_client)
-    with col1:
-        client_name = st.text_input("Client Name:", value=def_client)
-        attention_name = st.text_input("Attention Name (e.g. Adeline Druart):", value=def_attn)
-        use_letterhead = st.checkbox("📄 Export Word Doc on LBL Letterhead", value=False)
+  # Define default values safely from session state
+  def_client = st.session_state.get("client_name", "")
+  def_attn = st.session_state.get("attention_name", "")
+  def_email = st.session_state.get("client_email", "")
 
-    raw_mark = st.text_input("Full Trademark Name:", placeholder="e.g. SUN SHINE (include spaces if applicable)")
+  col1, col2 = st.columns(2)
+  with col1:
+    client_name = st.text_input(
+        "Client Name:", value=def_client, key="clearance_client_name"
+    )
+    attention_name = st.text_input(
+        "Attention Name (e.g. Adeline Druart):",
+        value=def_attn,
+        key="clearance_attention_name",
+    )
+  with col2:
+    client_email = st.text_input(
+        "Client Email:", value=def_email, key="clearance_client_email"
+    )
+    use_letterhead = st.checkbox(
+        "📄 Export Word Doc on LBL Letterhead",
+        value=False,
+        key="clearance_use_letterhead",
+    )
 
-    st.subheader("Search Term Expansions")
-    st.caption("Expand your search to catch variations, sound-alikes, meaning-alikes, and substrings.")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        dominant_term = st.text_input("Dominant/Core Word (optional):").upper()
-        phonetic_term = st.text_input("Phonetic Equivalent (optional):").upper()
-    with col_b:
-        conceptual_term = st.text_input("Conceptual Equivalent (optional):").upper()
-        substring_term = st.text_input("Root Substring / Pun (optional):").upper()
+  raw_mark = st.text_input(
+      "Full Trademark Name:",
+      placeholder="e.g. SUN SHINE (include spaces if applicable)",
+      key="clearance_raw_mark",
+  )
 
-    if st.button("Run Full Clearance Search", type="primary"):
-        if not raw_mark.strip():
-            st.error("Please enter a trademark name.")
-            return
+  st.subheader("Search Term Expansions")
+  st.caption(
+      "Expand your search to catch variations, sound-alikes, meaning-alikes,"
+      " and substrings."
+  )
+  col_a, col_b = st.columns(2)
+  with col_a:
+    dominant_term = st.text_input(
+        "Dominant/Core Word (optional):", key="clearance_dominant_term"
+    ).upper()
+    phonetic_term = st.text_input(
+        "Phonetic Equivalent (optional):", key="clearance_phonetic_term"
+    ).upper()
+  with col_b:
+    conceptual_term = st.text_input(
+        "Conceptual Equivalent (optional):", key="clearance_conceptual_term"
+    ).upper()
+    substring_term = st.text_input(
+        "Root Substring / Pun (optional):", key="clearance_substring_term"
+    ).upper()
 
-        squished_mark = raw_mark.replace(" ", "")
-        today = datetime.datetime.now()
+  if st.button("Run Full Clearance Search", type="primary"):
+    if not raw_mark.strip():
+      st.error("Please enter a trademark name.")
+      return
 
-        words = raw_mark.split()
-        web_mark_base = f'("{raw_mark}" OR "{squished_mark}")' if raw_mark != squished_mark else f'"{raw_mark}"'
-        uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
-        uspto_mark = f"({uspto_spaced}) OR (CM2:{squished_mark}*)" if raw_mark != squished_mark else uspto_spaced
-        ttb_marks_list = ["%" + "%".join(words) + "%"]
+    squished_mark = raw_mark.replace(" ", "")
+    today = datetime.datetime.now()
 
-        secondary_terms = []
-        if dominant_term:
-            web_mark_base += f' OR "{dominant_term}"'
-            secondary_terms.append(f"(CM2:*{dominant_term}*)") 
-            ttb_marks_list.append(f"%{dominant_term}%")
-        if phonetic_term:
-            web_mark_base += f' OR "{phonetic_term}"'
-            secondary_terms.append(f"(CM2:*{phonetic_term}*)")
-            ttb_marks_list.append(f"%{phonetic_term}%")
-        if conceptual_term:
-            web_mark_base += f' OR "{conceptual_term}"'
-            secondary_terms.append(f"(CM2:*{conceptual_term}*)")
-            ttb_marks_list.append(f"%{conceptual_term}%")
-        if substring_term:
-            web_mark_base += f' OR "{substring_term}"'
-            secondary_terms.append(f"(CM2:*{substring_term}*)")
-            ttb_marks_list.append(f"%{substring_term}%")
+    words = raw_mark.split()
+    web_mark_base = (
+        f'("{raw_mark}" OR "{squished_mark}")'
+        if raw_mark != squished_mark
+        else f'"{raw_mark}"'
+    )
+    uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
+    uspto_mark = (
+        f"({uspto_spaced}) OR (CM2:{squished_mark}*)"
+        if raw_mark != squished_mark
+        else uspto_spaced
+    )
+    ttb_marks_list = ["%" + "%".join(words) + "%"]
 
-        class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
-        date_filter = "" 
+    secondary_terms = []
+    if dominant_term:
+      web_mark_base += f' OR "{dominant_term}"'
+      secondary_terms.append(f"(CM2:*{dominant_term}*)")
+      ttb_marks_list.append(f"%{dominant_term}%")
+    if phonetic_term:
+      web_mark_base += f' OR "{phonetic_term}"'
+      secondary_terms.append(f"(CM2:*{phonetic_term}*)")
+      ttb_marks_list.append(f"%{phonetic_term}%")
+    if conceptual_term:
+      web_mark_base += f' OR "{conceptual_term}"'
+      secondary_terms.append(f"(CM2:*{conceptual_term}*)")
+      ttb_marks_list.append(f"%{conceptual_term}%")
+    if substring_term:
+      web_mark_base += f' OR "{substring_term}"'
+      secondary_terms.append(f"(CM2:*{substring_term}*)")
+      ttb_marks_list.append(f"%{substring_term}%")
 
-        primary_uspto_query = f"({uspto_mark}){class_filter}{date_filter}"
-        secondary_uspto_query = f"({' OR '.join(secondary_terms)}){class_filter}{date_filter}" if secondary_terms else None
+    class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
+    date_filter = ""
 
-        safe_mark = re.sub(r'[^A-Z0-9]', '_', squished_mark.upper())
-        timestamp = today.strftime("%H%M%S")
-        excel_filename = os.path.join(OUTPUT_DIR, f"{safe_mark}-USPTO-EXPORT-{today.strftime('%Y-%m-%d')}_{timestamp}.xlsx")
+    primary_uspto_query = f"({uspto_mark}){class_filter}{date_filter}"
+    secondary_uspto_query = (
+        f"({' OR '.join(secondary_terms)}){class_filter}{date_filter}"
+        if secondary_terms
+        else None
+    )
 
-        with st.spinner("Scraping USPTO, TTB, and Google... This may take a few minutes."):
-            try:
-                with sync_playwright() as p:
-                    cloud_args = [
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-gpu',
-                        '--single-process',
-                        '--no-zygote',
-                        '--disable-blink-features=AutomationControlled'
-                    ]
+    safe_mark = re.sub(r"[^A-Z0-9]", "_", squished_mark.upper())
+    timestamp = today.strftime("%H%M%S")
+    excel_filename = os.path.join(
+        OUTPUT_DIR,
+        f"{safe_mark}-USPTO-EXPORT-{today.strftime('%Y-%m-%d')}_{timestamp}.xlsx",
+    )
 
-                    # --- 1. Run USPTO Search ---
-                    browser = p.chromium.launch(
-    headless=True,
-    args=[
-        '--no-sandbox', 
-        '--disable-dev-shm-usage', 
-        '--disable-gpu', 
-        '--single-process',
-        '--js-flags="--max-old-space-size=256"'
-    ]
-)
-                    context = browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        accept_downloads=True,
-                        permissions=[]
-                    )
-                    page = context.new_page()
-                    uspto_data = scrape_uspto(page, primary_uspto_query, excel_filename, secondary_uspto_query)
-                    context.close()
-                    browser.close() 
-                    gc.collect()
+    with st.spinner(
+        "Scraping USPTO, TTB, and Google... This may take a few minutes."
+    ):
+      try:
+        with sync_playwright() as p:
+          cloud_args = [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-gpu",
+              "--single-process",
+              "--no-zygote",
+              "--disable-blink-features=AutomationControlled",
+          ]
 
-                    # --- 2. Run TTB Search (IN CHUNKS WITH FRESH BROWSERS) ---
-                    ttb_chunks = [
-                        ("01/01/1985", "12/31/1999"),
-                        ("01/01/2000", "12/31/2014"),
-                        ("01/01/2015", today.strftime("%m/%d/%Y"))
-                    ]
-                    
-                    raw_ttb_data = []
-                    for start_date, end_date in ttb_chunks:
-                        browser = p.chromium.launch(headless=True, args=cloud_args)
-                        context = browser.new_context(
-                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                            accept_downloads=True
-                        )
-                        chunk_page = context.new_page()
-                        
-                        chunk_results = scrape_ttb(chunk_page, start_date, end_date, list(set(ttb_marks_list)))
-                        if chunk_results:
-                            raw_ttb_data.extend(chunk_results)
-                        
-                        chunk_page.close()
-                        context.close()
-                        browser.close() 
-                        gc.collect()
-                    
-                    unique_ttb = {item['ttb_id']: item for item in raw_ttb_data}
-                    ttb_data = list(unique_ttb.values())
+          # --- 1. Run USPTO Search ---
+          browser = p.chromium.launch(
+              headless=True,
+              args=[
+                  "--no-sandbox",
+                  "--disable-dev-shm-usage",
+                  "--disable-gpu",
+                  "--single-process",
+                  '--js-flags="--max-old-space-size=256"',
+              ],
+          )
+          context = browser.new_context(
+              user_agent=(
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                  " AppleWebKit/537.36"
+              ),
+              accept_downloads=True,
+              permissions=[],
+          )
+          page = context.new_page()
+          uspto_data = scrape_uspto(
+              page, primary_uspto_query, excel_filename, secondary_uspto_query
+          )
+          context.close()
+          browser.close()
+          gc.collect()
 
-                # --- 3. Run Google Search ---
-                google_date_from = "1900-01-01"
-                google_date_to = today.strftime("%Y-%m-%d")
-                google_data = scrape_google(web_mark_base, raw_mark, google_date_from, google_date_to)
+          # --- 2. Run TTB Search (IN CHUNKS WITH FRESH BROWSERS) ---
+          ttb_chunks = [
+              ("01/01/1985", "12/31/1999"),
+              ("01/01/2000", "12/31/2014"),
+              ("01/01/2015", today.strftime("%m/%d/%Y")),
+          ]
 
-                # --- Report Generation ---
-                base_filename = f"Clearance_Report_{safe_mark}"
-                report_title = f"Clearance Report - {raw_mark.upper()}"
-                pdf_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.pdf")
-                docx_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.docx")
-                report_date = today.strftime("%B %d, %Y")
-
-                page_data = generate_pdf(raw_mark, squished_mark, "01/01/1985", today.strftime("%m/%d/%Y"), uspto_data, ttb_data, google_data, pdf_filename, report_title)
-                
-                generate_docx_2(
-                    client_name=client_name,
-                    attention_name=attention_name,
-                    email=client_email,
-                    report_date=report_date,
-                    raw_mark=raw_mark,
-                    report_title=report_title,
-                    page_data=page_data,
-                    output_filename=docx_filename,
-                    feedback_summary=[],
-                    use_letterhead=use_letterhead
-                )
-
-                with open(pdf_filename, "rb") as f:
-                    pdf_bytes = f.read()
-                with open(docx_filename, "rb") as f:
-                    docx_bytes = f.read()
-
-                st.session_state['clearance_report_data'] = {
-                    'base_filename': base_filename,
-                    'pdf_filename': pdf_filename,
-                    'docx_filename': docx_filename,
-                    'pdf_bytes': pdf_bytes,
-                    'docx_bytes': docx_bytes
-                }
-
-            except Exception as e:
-                st.error(f"Error during search execution: {e}")
-
-    # --- DISPLAY REPORT OUTPUTS IF GENERATED ---
-    if st.session_state.get('clearance_report_data'):
-        c_data = st.session_state['clearance_report_data']
-        st.success("Search & Report Generation Complete!")
-
-        col_d1, col_d2, col_d3 = st.columns(3)
-        with col_d1:
-            st.download_button(
-                "📥 Download PDF Report",
-                c_data['pdf_bytes'],
-                file_name=f"{c_data['base_filename']}.pdf",
-                mime="application/pdf",
-                width="stretch"
+          raw_ttb_data = []
+          for start_date, end_date in ttb_chunks:
+            browser = p.chromium.launch(headless=True, args=cloud_args)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    " AppleWebKit/537.36"
+                ),
+                accept_downloads=True,
             )
-        with col_d2:
-            st.download_button(
-                "📄 Download Word Doc Report",
-                c_data['docx_bytes'],
-                file_name=f"{c_data['base_filename']}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                width="stretch"
+            chunk_page = context.new_page()
+
+            chunk_results = scrape_ttb(
+                chunk_page, start_date, end_date, list(set(ttb_marks_list))
             )
-        with col_d3:
-            if st.button("☁️ Archive to Google Drive", width="stretch", key="archive_clearance"):
-                from utils.drive_uploader import upload_to_drive
-                with st.spinner("Archiving reports to Google Drive..."):
-                    pdf_link = upload_to_drive(c_data['pdf_filename'])
-                    docx_link = upload_to_drive(c_data['docx_filename'])
-                if pdf_link or docx_link:
-                    st.success("☁️ Clearance reports successfully archived to Google Drive!")
+            if chunk_results:
+              raw_ttb_data.extend(chunk_results)
+
+            chunk_page.close()
+            context.close()
+            browser.close()
+            gc.collect()
+
+          unique_ttb = {item["ttb_id"]: item for item in raw_ttb_data}
+          ttb_data = list(unique_ttb.values())
+
+        # --- 3. Run Google Search ---
+        google_date_from = "1900-01-01"
+        google_date_to = today.strftime("%Y-%m-%d")
+        google_data = scrape_google(
+            web_mark_base, raw_mark, google_date_from, google_date_to
+        )
+
+        # --- Report Generation ---
+        base_filename = f"Clearance_Report_{safe_mark}"
+        report_title = f"Clearance Report - {raw_mark.upper()}"
+        pdf_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.pdf")
+        docx_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.docx")
+        report_date = today.strftime("%B %d, %Y")
+
+        page_data = generate_pdf(
+            raw_mark,
+            squished_mark,
+            "01/01/1985",
+            today.strftime("%m/%d/%Y"),
+            uspto_data,
+            ttb_data,
+            google_data,
+            pdf_filename,
+            report_title,
+        )
+
+        generate_docx_2(
+            client_name=client_name,
+            attention_name=attention_name,
+            email=client_email,
+            report_date=report_date,
+            raw_mark=raw_mark,
+            report_title=report_title,
+            page_data=page_data,
+            output_filename=docx_filename,
+            feedback_summary=[],
+            use_letterhead=use_letterhead,
+        )
+
+        with open(pdf_filename, "rb") as f:
+          pdf_bytes = f.read()
+        with open(docx_filename, "rb") as f:
+          docx_bytes = f.read()
+
+        st.session_state["clearance_report_data"] = {
+            "base_filename": base_filename,
+            "pdf_filename": pdf_filename,
+            "docx_filename": docx_filename,
+            "pdf_bytes": pdf_bytes,
+            "docx_bytes": docx_bytes,
+        }
+
+      except Exception as e:
+        st.error(f"Error during search execution: {e}")
+
+  # --- DISPLAY REPORT OUTPUTS IF GENERATED ---
+  if st.session_state.get("clearance_report_data"):
+    c_data = st.session_state["clearance_report_data"]
+    st.success("Search & Report Generation Complete!")
+
+    col_d1, col_d2, col_d3 = st.columns(3)
+    with col_d1:
+      st.download_button(
+          "📥 Download PDF Report",
+          c_data["pdf_bytes"],
+          file_name=f"{c_data['base_filename']}.pdf",
+          mime="application/pdf",
+          width="stretch",
+      )
+    with col_d2:
+      st.download_button(
+          "📄 Download Word Doc Report",
+          c_data["docx_bytes"],
+          file_name=f"{c_data['base_filename']}.docx",
+          mime=(
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          ),
+          width="stretch",
+      )
+    with col_d3:
+      if st.button(
+          "☁️ Archive to Google Drive",
+          width="stretch",
+          key="archive_clearance",
+      ):
+        from utils.drive_uploader import upload_to_drive
+
+        with st.spinner("Archiving reports to Google Drive..."):
+          pdf_link = upload_to_drive(c_data["pdf_filename"])
+          docx_link = upload_to_drive(c_data["docx_filename"])
+        if pdf_link or docx_link:
+          st.success(
+              "☁️ Clearance reports successfully archived to Google Drive!"
+          )
