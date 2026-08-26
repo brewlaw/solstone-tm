@@ -24,6 +24,7 @@ tool = st.sidebar.radio(
         "Letter of Protest Generator",
         "Cloud Report Archive"
         "GOODS/SERVICES DESCRIPTION BUILDER"
+        "TEST"
     ]
 )
 
@@ -167,3 +168,5 @@ elif tool == "Letter of Protest Generator":
     lop_generator.run()
 elif tool == "Cloud Report Archive":
     show_drive_archive()
+elif tool == "TEST":
+    test.run()
