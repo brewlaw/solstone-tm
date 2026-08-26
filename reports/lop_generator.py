@@ -1,12 +1,10 @@
 import streamlit as st
-import time
 import re
-import gc
 import os
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# Import your actual USPTO scraper
+# Import your actual USPTO scraper for Step 2
 from scrapers.uspto_scraper import scrape_uspto
 
 # Default related terms lookup for popular classes
@@ -25,8 +23,8 @@ DEFAULT_RELATED_TERMS = {
 # ==========================================
 def parse_goods_to_df(raw_goods):
     """Splits raw goods text by semicolons/newlines into a DataFrame for the checklist UI."""
-    if not raw_goods or "Goods boundaries not found" in raw_goods:
-        return pd.DataFrame({"Select": [False], "Keyword": [raw_goods]})
+    if not raw_goods or not raw_goods.strip():
+        return pd.DataFrame({"Select": [], "Keyword": []})
     
     raw_items = re.split(r'[;\n]', raw_goods)
     cleaned_items = [item.strip() for item in raw_items if item.strip()]
@@ -40,123 +38,7 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. TSDR COMBINED SCRAPER (SINGLE BROWSER, DUAL TABS)
-# ==========================================
-def fetch_both_tsdr_data(client_sn, app_sn):
-    """Fetches Client AND Applicant TSDR data inside a single browser using separate tabs to avoid DOM conflicts."""
-    results = {
-        "client": ("Unknown Mark", "Goods boundaries not found. Please manually copy from TSDR."),
-        "applicant": ("Unknown Mark", "Goods boundaries not found. Please manually copy from TSDR.")
-    }
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-blink-features=AutomationControlled'
-            ]
-        )
-        # Establish ONE trusted session context
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            java_script_enabled=True
-        )
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        js_extract = """
-        () => {
-            let markName = "Unknown Mark";
-            let goodsArray = [];
-            
-            // Extract Mark Name
-            let keys = document.querySelectorAll('div.key');
-            for (let k of keys) {
-                let text = k.textContent.trim();
-                if (text === 'Mark:' || text === 'Word Mark:') {
-                    let val = k.nextElementSibling;
-                    if (val && val.classList.contains('value')) {
-                        markName = val.textContent.trim();
-                        break;
-                    }
-                }
-            }
-            
-            // Extract Goods
-            let rows = document.querySelectorAll('div.row');
-            for (let row of rows) {
-                let keyNode = row.querySelector('div.key');
-                let valNode = row.querySelector('div.value');
-                if (keyNode && valNode) {
-                    if (keyNode.textContent.trim() === 'For:') {
-                        let cleanGoods = valNode.textContent.replace(/\\s+/g,' ').trim();
-                        if (cleanGoods) {
-                            goodsArray.push(cleanGoods);
-                        }
-                    }
-                }
-            }
-            return {
-                mark: markName,
-                goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
-            };
-        }
-        """
-
-        # --- STEP A: FETCH CLIENT DATA (TAB 1) ---
-        if client_sn:
-            try:
-                page1 = context.new_page()
-                url = f"https://tsdr.uspto.gov/#caseNumber={client_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                page1.goto(url, timeout=30000)
-                
-                try:
-                    page1.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                except:
-                    # Fallback human navigation
-                    page1.locator('#searchNumber').fill(str(client_sn))
-                    page1.locator('#searchNumber').press("Enter")
-                    page1.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                    
-                page1.wait_for_timeout(2000)
-                res = page1.evaluate(js_extract)
-                results["client"] = (res.get('mark'), res.get('goods'))
-                page1.close() # Close tab to free memory
-            except Exception as e:
-                results["client"] = (None, f"Error fetching client: {str(e)}")
-
-        time.sleep(1) # Brief human pause so we don't hit the server at the exact same millisecond
-
-        # --- STEP B: FETCH APPLICANT DATA (TAB 2) ---
-        if app_sn:
-            try:
-                page2 = context.new_page()
-                url = f"https://tsdr.uspto.gov/#caseNumber={app_sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                page2.goto(url, timeout=30000)
-                
-                try:
-                    page2.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                except:
-                    # Fallback human navigation
-                    page2.locator('#searchNumber').fill(str(app_sn))
-                    page2.locator('#searchNumber').press("Enter")
-                    page2.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
-                    
-                page2.wait_for_timeout(2000)
-                res = page2.evaluate(js_extract)
-                results["applicant"] = (res.get('mark'), res.get('goods'))
-                page2.close() # Close tab
-            except Exception as e:
-                results["applicant"] = (None, f"Error fetching applicant: {str(e)}")
-
-        browser.close()
-        return results["client"], results["applicant"]
-
-# ==========================================
-# 3. HELPER: CLEAN & SCORE RESULTS
+# 2. HELPER: CLEAN & SCORE RESULTS
 # ==========================================
 def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
     """Filters goods to relevant classes, isolates exact matches, and assigns a ranking score."""
@@ -272,67 +154,55 @@ def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
 # ==========================================
 def run():
     st.title("Letter of Protest Generator")
-    st.markdown("Extract goods/services, run a bridging search, and generate a compliant Exhibit A PDF.")
+    st.markdown("Enter goods/services manually, run a bridging search, and generate a compliant Exhibit A PDF.")
 
-    # --- STEP 1: EXTRACT & VERIFY ---
-    st.markdown("### Step 1: Extract & Verify")
+    # --- STEP 1: MANUAL INPUT & VERIFY ---
+    st.markdown("### Step 1: Input Classes & Goods/Services")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("#### Client Details")
-        client_sn = st.text_input("Client Serial / Reg Number", key="client_sn")
         client_class = st.text_input("Client Class(es)", placeholder="e.g., 032", key="client_class")
+        client_raw = st.text_area("Client Goods / Services", placeholder="Paste client goods here (e.g., Beer; Malt beverages)", height=120, key="client_raw")
+    
     with col2:
         st.markdown("#### Applicant Details")
-        app_sn = st.text_input("Applicant Serial Number", key="app_sn")
         app_class = st.text_input("Applicant Class(es)", placeholder="e.g., 043", key="applicant_class")
+        app_raw = st.text_area("Applicant Goods / Services", placeholder="Paste applicant goods here (e.g., Bar and restaurant services)", height=120, key="applicant_raw")
 
-    if st.button("Fetch TSDR Data", type="primary"):
-        with st.spinner("Scraping Client and Applicant Data in single browser session..."):
-            c_data, a_data = fetch_both_tsdr_data(client_sn, app_sn)
-            
-            c_mark, c_goods = c_data
-            a_mark, a_goods = a_data
-            
-            st.session_state['c_mark'] = c_mark
-            st.session_state['c_goods_df'] = parse_goods_to_df(c_goods)
-            
-            st.session_state['a_mark'] = a_mark
-            st.session_state['a_goods_df'] = parse_goods_to_df(a_goods)
-            
-        st.rerun()
+    st.info("Check the boxes next to the specific keywords you want to cross-reference in the bridging search.")
 
-    st.info("Check the boxes next to the specific goods/services you want to cross-reference. You can double-click a keyword in the table to manually edit it!")
+    # Generate checklist DataFrames directly from the pasted raw text
+    c_df = parse_goods_to_df(client_raw)
+    a_df = parse_goods_to_df(app_raw)
 
     col3, col4 = st.columns(2)
     with col3:
-        st.markdown(f"**Mark:** {st.session_state.get('c_mark', 'None')}")
-        if 'c_goods_df' in st.session_state:
-            edited_c_df = st.data_editor(
-                st.session_state['c_goods_df'],
-                hide_index=True,
-                use_container_width=True,
-                key="c_goods_editor",
-                column_config={
-                    "Select": st.column_config.CheckboxColumn("Select", width="small"),
-                    "Keyword": st.column_config.TextColumn("Client Keywords", width="large")
-                }
-            )
-            st.session_state['c_goods_df'] = edited_c_df
+        st.markdown("**Client Keywords**")
+        edited_c_df = st.data_editor(
+            c_df,
+            hide_index=True,
+            use_container_width=True,
+            key="c_goods_editor",
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", width="small"),
+                "Keyword": st.column_config.TextColumn("Client Keywords", width="large")
+            }
+        )
+        st.session_state['c_goods_df'] = edited_c_df
 
     with col4:
-        st.markdown(f"**Mark:** {st.session_state.get('a_mark', 'None')}")
-        if 'a_goods_df' in st.session_state:
-            edited_a_df = st.data_editor(
-                st.session_state['a_goods_df'],
-                hide_index=True,
-                use_container_width=True,
-                key="a_goods_editor",
-                column_config={
-                    "Select": st.column_config.CheckboxColumn("Select", width="small"),
-                    "Keyword": st.column_config.TextColumn("Applicant Keywords", width="large")
-                }
-            )
-            st.session_state['a_goods_df'] = edited_a_df
+        st.markdown("**Applicant Keywords**")
+        edited_a_df = st.data_editor(
+            a_df,
+            hide_index=True,
+            use_container_width=True,
+            key="a_goods_editor",
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", width="small"),
+                "Keyword": st.column_config.TextColumn("Applicant Keywords", width="large")
+            }
+        )
+        st.session_state['a_goods_df'] = edited_a_df
 
     # --- STEP 2: BRIDGING SEARCH ---
     st.divider()
@@ -347,14 +217,11 @@ def run():
             st.error("Please enter both the Client and Applicant classes in Step 1 before searching!")
             st.stop()
             
-        if 'c_goods_df' not in st.session_state or 'a_goods_df' not in st.session_state:
-            st.error("Please fetch TSDR data first.")
-            st.stop()
-            
-        c_df = st.session_state['c_goods_df']
-        a_df = st.session_state['a_goods_df']
-        c_selected = c_df[c_df['Select'] == True]['Keyword'].tolist()
-        a_selected = a_df[a_df['Select'] == True]['Keyword'].tolist()
+        c_df_current = st.session_state.get('c_goods_df', pd.DataFrame())
+        a_df_current = st.session_state.get('a_goods_df', pd.DataFrame())
+        
+        c_selected = c_df_current[c_df_current['Select'] == True]['Keyword'].tolist() if not c_df_current.empty else []
+        a_selected = a_df_current[a_df_current['Select'] == True]['Keyword'].tolist() if not a_df_current.empty else []
         
         if not c_selected or not a_selected:
             st.error("Please check at least one box for BOTH the Client and the Applicant keywords.")
@@ -421,7 +288,6 @@ def run():
                 raw_c = st.session_state.get('client_class', '').strip().zfill(3)
                 raw_t = st.session_state.get('applicant_class', '').strip().zfill(3)
                 
-                # Fetch default terms for the classes
                 default_c_terms = DEFAULT_RELATED_TERMS.get(raw_c.lstrip('0'), ["goods", "products"])
                 default_t_terms = DEFAULT_RELATED_TERMS.get(raw_t.lstrip('0'), ["services", "providing services"])
                 
@@ -445,7 +311,6 @@ def run():
                     custom_t = st.text_input("Other Applicant Terms (comma-separated):", placeholder="e.g., restaurant services, tavern", key="custom_t")
 
                 if st.button("🚀 Run Expanded Search", type="secondary"):
-                    # Combine original and new terms
                     c_clean = list(st.session_state.get('primary_c_kws', []))
                     t_clean = list(st.session_state.get('primary_t_kws', []))
                     
@@ -482,7 +347,6 @@ def run():
                         if exp_df.empty:
                             st.warning("No additional registrations found with expanded terms.")
                         else:
-                            # Merge with existing results if any existed
                             if not df.empty:
                                 combined = pd.concat([df, exp_df.drop(columns=['Raw Goods', 'MatchScore'])], ignore_index=True)
                                 combined = combined.drop_duplicates(subset=['Reg Number'], keep='first').reset_index(drop=True)
