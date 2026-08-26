@@ -35,13 +35,10 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. INITIAL DATA SCRAPER (TMSearch Web UI)
+# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
-    """
-    Replaces the broken TSDR scraper. 
-    Mimics uspto_scraper.py to search TMSearch directly and copies goods from the DOM.
-    """
+    """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
     if not serial_number: return None, None
         
     max_retries = 3
@@ -50,317 +47,92 @@ def fetch_tsdr_data(serial_number, target_classes):
             with sync_playwright() as p:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+                    args=[
+                        '--no-sandbox', 
+                        '--disable-dev-shm-usage', 
+                        '--disable-gpu', 
+                        '--disable-blink-features=AutomationControlled'
+                    ]
                 )
-                page = browser.new_page()
-                
-                # 1. Navigate to TMSearch using the exact same flow as uspto_scraper.py
-                page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=45000, wait_until="domcontentloaded")
-                time.sleep(2)
-
-                # 2. Locate the search box exactly like uspto_scraper.py
-                search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
-                
-                try:
-                    search_input.wait_for(state="visible", timeout=5000)
-                except:
-                    builder_toggle = page.locator("text='Field tag and Search builder'").last
-                    if builder_toggle.is_visible():
-                        builder_toggle.click(force=True)
-                        time.sleep(1)
-                    search_input = page.get_by_placeholder("Search using field tags").first
-                    search_input.wait_for(state="visible", timeout=10000)
-
-                # 3. Format the SN or RN query and search
-                num_str = str(serial_number).strip()
-                query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
-                
-                search_input.fill(query)
-                page.keyboard.press("Enter")
-                
-                # 4. Wait for the goods container to appear. 
-                # (When searching a single SN, TMSearch auto-loads the detailed result page!)
-                goods_container = page.locator("#tm-detail_goods-and-services-goods-and-services")
-                try:
-                    goods_container.wait_for(state="visible", timeout=15000)
-                except:
-                    # Fallback just in case it loads a list view instead
-                    first_link = page.locator("a[href*='/search-results/']").first
-                    if first_link.is_visible():
-                        first_link.click(force=True)
-                        goods_container.wait_for(state="visible", timeout=10000)
-                    else:
-                        raise Exception("Could not find the goods container on the page.")
-
-                # 5. Extract Mark Name
-                mark_name = page.evaluate("""() => {
-                    let elements = Array.from(document.querySelectorAll('p, div, span, label, th, td'));
-                    let wm = elements.find(el => el.textContent.trim() === 'Wordmark' || el.textContent.trim() === 'Mark');
-                    return (wm && wm.nextElementSibling) ? wm.nextElementSibling.textContent.trim() : 'Unknown Mark';
-                }""")
-                
-                if mark_name == "Unknown Mark" or not mark_name:
-                    mark_name = "[Design Mark / Unlabeled]"
-
-                # 6. Extract Goods text directly via Python Playwright
-                raw_goods_text = goods_container.inner_text()
-                
-                browser.close()
-                
-                # 7. Clean up the extracted goods text (Strip "IC 032:" and "| First Use...")
-                cleaned_clauses = []
-                for line in raw_goods_text.split('\n'):
-                    line = line.strip()
-                    if line:
-                        # Remove the 'IC 032:' prefix
-                        line = re.sub(r'(?i)^IC\s*\d{1,3}\s*[:.]\s*', '', line)
-                        # Remove everything after the pipe character (dates)
-                        line = line.split('|')[0].strip()
-                        if line:
-                            cleaned_clauses.append(line)
-                            
-                final_goods = "; ".join(cleaned_clauses) if cleaned_clauses else "Goods boundaries not found."
-                
-                return mark_name, final_goods
-                
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2)
-                continue
-            else:
-                return "Error", f"TMSearch fetch failed: {str(e)}"
-
-
-# ==========================================
-# 3. TMSearch INITIAL DATA SCRAPER (DOM EXTRACTION)
-# ==========================================
-def fetch_initial_data(serial_number):
-    """Scrapes tmsearch.uspto.gov by mimicking the exact search flow of uspto_scraper, then reading the DOM."""
-    if not serial_number: return None, None
-        
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=['--no-sandbox', '--disable-dev-shm-usage']
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1920, "height": 1080},
+                    java_script_enabled=True
                 )
-                page = browser.new_page()
+                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                page = context.new_page()
                 
-                # 1. Exact navigation and waits from uspto_scraper.py
-                page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=45000, wait_until="domcontentloaded")
-                time.sleep(2)
-
-                # 2. Exact search field targeting from uspto_scraper.py
-                search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
+                url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+                page.goto(url, timeout=30000)
                 
                 try:
-                    search_input.wait_for(state="visible", timeout=5000)
+                    page.wait_for_selector("div.value", state="attached", timeout=15000)
                 except:
-                    builder_toggle = page.locator("text='Field tag and Search builder'").last
-                    if builder_toggle.is_visible():
-                        builder_toggle.click(force=True)
-                        time.sleep(1)
-                    search_input = page.get_by_placeholder("Search using field tags").first
-                    search_input.wait_for(state="visible", timeout=10000)
+                    try:
+                        page.locator('#searchNumber').fill(serial_number)
+                        page.locator('#searchNumber').press("Enter")
+                        page.wait_for_selector("div.value", state="attached", timeout=15000)
+                    except:
+                        pass 
+                    
+                page.wait_for_timeout(2000) 
+                
+                if "Access Denied" in page.content():
+                    browser.close()
+                    raise Exception("USPTO Firewall Blocked the Connection.")
 
-                # Format the SN or RN query
-                num_str = str(serial_number).strip()
-                query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
-                
-                # 3. Fill, search, and wait exactly like uspto_scraper.py
-                search_input.fill(query)
-                page.keyboard.press("Enter")
-                time.sleep(4) 
-                
-                # 4. Wait for the goods container to load on the single-result screen
-                page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
-                
-                # 5. Extract directly from DOM and clean the text
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
-                    
-                    // Grab Mark Name
-                    let labels = Array.from(document.querySelectorAll('div, span, p, h2, h3, h4, label'));
-                    let wmLabel = labels.find(el => el.textContent.trim() === 'Wordmark' || el.textContent.trim() === 'Mark');
-                    if (wmLabel && wmLabel.nextElementSibling) {
-                        markName = wmLabel.nextElementSibling.textContent.trim();
-                    }
-                    
-                    // Grab Goods and strip Class numbers & dates
-                    let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
-                    if (goodsBox) {
-                        let pTags = goodsBox.querySelectorAll('p.mb-1, p.mb-2, p');
-                        if (pTags.length > 0) {
-                            pTags.forEach(p => {
-                                let text = p.textContent.trim().replace(/\\s+/g, ' ');
-                                text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
-                                text = text.split('|')[0].trim();
-                                if (text) goodsArray.push(text);
-                            });
-                        } else {
-                            let text = goodsBox.textContent.trim().replace(/\\s+/g, ' ');
-                            text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
-                            text = text.split('|')[0].trim();
-                            goodsArray.push(text);
+                    let keys = document.querySelectorAll('div.key');
+                    for (let k of keys) {
+                        let text = k.textContent.trim();
+                        if (text === 'Mark:' || text === 'Word Mark:') {
+                            let val = k.nextElementSibling;
+                            if (val && val.classList.contains('value')) {
+                                markName = val.textContent.trim();
+                                break;
+                            }
                         }
                     }
-                    
-                    return { mark: markName, goods: goodsArray.length > 0 ? goodsArray.join("; ") : "Goods boundaries not found." };
+                    let rows = document.querySelectorAll('div.row');
+                    for (let row of rows) {
+                        let keyNode = row.querySelector('div.key');
+                        let valNode = row.querySelector('div.value');
+                        if (keyNode && valNode) {
+                            if (keyNode.textContent.trim() === 'For:') {
+                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
+                                if (cleanGoods) {
+                                    goodsArray.push(cleanGoods);
+                                }
+                            }
+                        }
+                    }
+                    return { 
+                        mark: markName, 
+                        goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
+                    };
                 }
                 """
                 
                 result = page.evaluate(js_extract)
+                mark_name = result.get('mark', 'Unknown Mark')
+                goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
+                
                 browser.close()
                 
-                return result['mark'], result['goods']
+                if mark_name == "Unknown Mark":
+                    raise Exception("Page loaded but data was missing. Retrying...")
+                    
+                return mark_name, goods_text
                 
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2)
                 continue
             else:
-                return "Error", f"Error fetching data from TMSearch: {str(e)}"
-
-# ==========================================
-# 4. HELPER: CLEAN & SCORE RESULTS (TIERED)
-# ==========================================
-def clean_goods_exact_scored(text, c_cls, t_cls, all_c, all_t, orig_c, orig_t):
-    """Filters goods, isolates matches, and scores based on Original vs Expanded keyword tiers."""
-    if not isinstance(text, str): return "", 0
-    segments = re.finditer(r'IC\s*0*(\d+)[\s.:]+(.*?)(?=IC\s*\d+|$)', text, re.IGNORECASE | re.DOTALL)
-    
-    class_kws = {}
-    if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in all_c]
-    if t_cls: 
-        t_str = t_cls.lstrip('0')
-        class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in all_t]
-        
-    orig_c_clean = [k.lower().strip(".;, ") for k in orig_c]
-    orig_t_clean = [k.lower().strip(".;, ") for k in orig_t]
-        
-    filtered = []
-    base_score = 0
-    c_has_orig_match = False
-    t_has_orig_match = False
-    
-    for match in segments:
-        cls_num = match.group(1)
-        raw_desc = match.group(2).strip().rstrip(';')
-        
-        if cls_num in class_kws:
-            kws = class_kws[cls_num]
-            clean_desc = re.sub(r'(?i)US\s*[\d\s,]+[.:]\s*', '', raw_desc)
-            clean_desc = re.sub(r'(?i)G\s*&\s*S\s*[:.]\s*', '', clean_desc)
-            clauses = [c.strip() for c in clean_desc.split(';')]
-            
-            exact_matches = []
-            partial_matches = []
-            
-            for clause in clauses:
-                c_lower = clause.lower().strip(".;, ")
-                matched_exact = False
-                matched_list = False
-                matched_kw = None
-                
-                for kw in kws:
-                    if c_lower == kw:
-                        matched_exact = True
-                        matched_kw = kw
-                        break
-                    sub_items = [x.strip(".;, ") for x in c_lower.split(',')]
-                    if kw in sub_items:
-                        matched_list = True
-                        matched_kw = kw
-                        break
-                        
-                if matched_exact:
-                    exact_matches.append(clause)
-                    base_score += 100 
-                elif matched_list:
-                    exact_matches.append(clause)
-                    base_score += 50  
-                else:
-                    for kw in kws:
-                        if re.search(rf'\b{re.escape(kw)}\b', c_lower):
-                            partial_matches.append(clause)
-                            base_score += 10 
-                            matched_kw = kw
-                            break
-                            
-                # Check if the matched keyword is from the ORIGINAL Step 2 list
-                if matched_kw:
-                    if matched_kw in orig_c_clean:
-                        c_has_orig_match = True
-                    if matched_kw in orig_t_clean:
-                        t_has_orig_match = True
-                            
-            if exact_matches:
-                display_desc = exact_matches[0] 
-            elif partial_matches:
-                display_desc = partial_matches[0] 
-            else:
-                display_desc = clauses[0] if clauses else clean_desc 
-                
-            filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
-            
-    # Apply Tier Bonus based on Original Term matches
-    tier_bonus = 0
-    if c_has_orig_match and t_has_orig_match:
-        tier_bonus = 1000000  # Tier 1: Both original
-    elif c_has_orig_match or t_has_orig_match:
-        tier_bonus = 100000   # Tier 2: One original, one expanded
-        
-    total_score = base_score + tier_bonus
-            
-    return "\n | ".join(filtered) if filtered else "", total_score
-
-def process_uspto_excel_results(excel_out, c_class, t_class, all_c, all_t, orig_c, orig_t):
-    """Reads raw Excel file from scrape_uspto, filters live registrations, scores matches, and builds DF."""
-    if not os.path.exists(excel_out):
-        return pd.DataFrame()
-        
-    raw_df = pd.read_excel(excel_out)
-    if raw_df.empty:
-        return pd.DataFrame()
-        
-    cols = raw_df.columns
-    sn_col = next((c for c in cols if 'serial' in str(c).lower()), None)
-    rn_col = next((c for c in cols if 'registrationnumber' in str(c).lower() or 'reg' in str(c).lower() and 'num' in str(c).lower()), None)
-    mark_col = next((c for c in cols if 'wordmark' in str(c).lower() or 'mark' in str(c).lower()), None)
-    owner_col = next((c for c in cols if 'owner' in str(c).lower() or 'applicant' in str(c).lower()), None)
-    goods_col = next((c for c in cols if 'good' in str(c).lower() or 'service' in str(c).lower()), None)
-    status_col = next((c for c in cols if 'status' in str(c).lower()), None)
-    
-    # STRICT FILTER: Only keep Registered Marks
-    if rn_col:
-        raw_df = raw_df[raw_df[rn_col].notna()]
-        raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != '']
-        raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != 'nan']
-        raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != 'N/A']
-    else:
-        return pd.DataFrame()
-        
-    if raw_df.empty:
-        return pd.DataFrame()
-        
-    ui_df = pd.DataFrame()
-    ui_df['Serial'] = raw_df[sn_col].astype(str).str.replace(r'\.0$', '', regex=True)
-    ui_df['Reg Number'] = raw_df[rn_col].astype(str).str.replace(r'\.0$', '', regex=True)
-    ui_df['Mark'] = raw_df[mark_col].astype(str)
-    ui_df['Owner'] = raw_df[owner_col].astype(str)
-    ui_df['Status'] = raw_df[status_col].astype(str) if status_col else "Live"
-    ui_df['Raw Goods'] = raw_df[goods_col].astype(str)
-    
-    applied = ui_df['Raw Goods'].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, all_c, all_t, orig_c, orig_t))
-    ui_df['Filtered Goods'] = applied.apply(lambda x: x[0])
-    ui_df['MatchScore'] = applied.apply(lambda x: x[1])
-    
-    ui_df = ui_df[ui_df['Filtered Goods'] != ""]
-    return ui_df
+                return None, f"Error fetching data after 3 attempts: {str(e)}"
 
 # ==========================================
 # PAGE UI & LAYOUT (WRAPPED IN RUN FUNCTION)
@@ -433,7 +205,7 @@ def run():
     # --- STEP 2: BRIDGING SEARCH ---
     st.divider()
     st.markdown("### Step 2: Bridging Search")
-    if st.button("Execute Bridging Search", type="primary"):
+    if st.button("Execute Bridging Search"):
         raw_c = st.session_state.get('client_class', '')
         raw_t = st.session_state.get('applicant_class', '')
         c_class = str(raw_c).strip().zfill(3)
@@ -459,10 +231,6 @@ def run():
         with st.spinner("Searching USPTO via tmsearch.uspto.gov..."):
             c_clean = [kw.strip().replace('"', '') for kw in c_selected]
             t_clean = [kw.strip().replace('"', '') for kw in a_selected]
-            
-            st.session_state['primary_c_kws'] = c_clean
-            st.session_state['primary_t_kws'] = t_clean
-
             c_kw_str = " OR ".join([f'"{kw}"' for kw in c_clean])
             t_kw_str = " OR ".join([f'"{kw}"' for kw in t_clean])
 
@@ -471,137 +239,158 @@ def run():
             excel_out = "temp_bridging_search.xlsx" 
             try:
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-dev-shm-usage']
+                    )
                     page = browser.new_page()
-                    _ = scrape_uspto(page=page, primary_query=search_query, excel_filename=excel_out)
+                    # We run the scraper, but we will ignore its formatted output and steal the raw Excel file instead!
+                    _ = scrape_uspto(
+                        page=page,
+                        primary_query=search_query,
+                        excel_filename=excel_out
+                    )
                     browser.close()
             except Exception as e:
                 st.error(f"Error scraping USPTO: {e}")
                 st.stop()
                 
-            ui_df = process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean, c_clean, t_clean)
+            if not os.path.exists(excel_out):
+                st.warning(f"No bridging registrations found for query: `{search_query}`.")
+                st.stop()
+                
+            # Read the RAW Excel data so we don't lose the full goods list
+            raw_df = pd.read_excel(excel_out)
             
-            if ui_df.empty:
-                st.warning(f"No bridging registrations found for query: `{search_query}`. Try checking different keyword boxes.")
-                st.session_state['bridging_results'] = pd.DataFrame()
-            else:
-                ui_df = ui_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
-                ui_df_clean = ui_df.drop(columns=['Raw Goods', 'MatchScore'])
-                st.session_state['bridging_results'] = ui_df_clean
+            # Map the dynamic column names
+            cols = raw_df.columns
+            sn_col = next((c for c in cols if 'serial' in str(c).lower()), None)
+            rn_col = next((c for c in cols if 'registrationnumber' in str(c).lower() or 'reg' in str(c).lower() and 'num' in str(c).lower()), None)
+            mark_col = next((c for c in cols if 'wordmark' in str(c).lower() or 'mark' in str(c).lower()), None)
+            owner_col = next((c for c in cols if 'owner' in str(c).lower() or 'applicant' in str(c).lower()), None)
+            goods_col = next((c for c in cols if 'good' in str(c).lower() or 'service' in str(c).lower()), None)
+            status_col = next((c for c in cols if 'status' in str(c).lower()), None)
+            
+            # STRICT FILTER: Only keep Registered Marks
+            if rn_col:
+                raw_df = raw_df[raw_df[rn_col].notna()]
+                raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != '']
+                raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != 'nan']
+                raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != 'N/A']
+            
+            if raw_df.empty:
+                st.warning("No REGISTERED marks found. Try broadening your keywords.")
+                st.stop()
+                
+            # Build the clean UI DataFrame
+            ui_df = pd.DataFrame()
+            ui_df['Serial'] = raw_df[sn_col].astype(str).str.replace(r'\.0$', '', regex=True)
+            ui_df['Reg Number'] = raw_df[rn_col].astype(str).str.replace(r'\.0$', '', regex=True)
+            ui_df['Mark'] = raw_df[mark_col].astype(str)
+            ui_df['Owner'] = raw_df[owner_col].astype(str)
+            ui_df['Status'] = raw_df[status_col].astype(str) if status_col else "Live"
+            ui_df['Raw Goods'] = raw_df[goods_col].astype(str)
+            
+            # EXACT MATCH FILTER & SCORING ALGORITHM
+            def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
+                if not isinstance(text, str): return "", 0
+                segments = re.finditer(r'IC\s*0*(\d+)[\s.:]+(.*?)(?=IC\s*\d+|$)', text, re.IGNORECASE | re.DOTALL)
+                
+                class_kws = {}
+                if c_cls: class_kws[c_cls.lstrip('0')] = [k.lower().strip(".;, ") for k in c_kws]
+                if t_cls: 
+                    t_str = t_cls.lstrip('0')
+                    class_kws[t_str] = class_kws.get(t_str, []) + [k.lower().strip(".;, ") for k in t_kws]
+                    
+                filtered = []
+                score = 0
+                
+                for match in segments:
+                    cls_num = match.group(1)
+                    raw_desc = match.group(2).strip().rstrip(';')
+                    
+                    # ENFORCE STRICT CLASS MATCHING (Ignores IC 018, 025, etc.)
+                    if cls_num in class_kws:
+                        kws = class_kws[cls_num]
+                        clean_desc = re.sub(r'(?i)US\s*[\d\s,]+[.:]\s*', '', raw_desc)
+                        clean_desc = re.sub(r'(?i)G\s*&\s*S\s*[:.]\s*', '', clean_desc)
+                        clauses = [c.strip() for c in clean_desc.split(';')]
+                        
+                        exact_matches = []
+                        partial_matches = []
+                        
+                        for clause in clauses:
+                            c_lower = clause.lower().strip(".;, ")
+                            matched_exact = False
+                            matched_list = False
+                            
+                            for kw in kws:
+                                if c_lower == kw:
+                                    matched_exact = True
+                                    break
+                                sub_items = [x.strip(".;, ") for x in c_lower.split(',')]
+                                if kw in sub_items:
+                                    matched_list = True
+                                    break
+                                    
+                            if matched_exact:
+                                exact_matches.append(clause)
+                                score += 100 
+                            elif matched_list:
+                                exact_matches.append(clause)
+                                score += 50  
+                            else:
+                                for kw in kws:
+                                    if re.search(rf'\b{re.escape(kw)}\b', c_lower):
+                                        partial_matches.append(clause)
+                                        score += 10 
+                                        break
+                                        
+                        if exact_matches:
+                            display_desc = "; ".join(exact_matches)
+                        elif partial_matches:
+                            display_desc = "; ".join(partial_matches)
+                        else:
+                            display_desc = clean_desc 
+                            
+                        filtered.append(f"IC {cls_num.zfill(3)}: {display_desc}")
+                        
+                # Use double-newlines so Streamlit stacks them perfectly
+                return "\n | ".join(filtered) if filtered else "", score
 
+            # Apply Logic
+            applied = ui_df['Raw Goods'].apply(lambda x: clean_goods_exact_scored(x, c_class, t_class, c_clean, t_clean))
+            ui_df['Filtered Goods'] = applied.apply(lambda x: x[0])
+            ui_df['MatchScore'] = applied.apply(lambda x: x[1])
+            
+            # Remove rows that had 0 matching classes (This eliminates the IC 018 glitch)
+            ui_df = ui_df[ui_df['Filtered Goods'] != ""]
+            
+            # Sort by highest match score, then drop the hidden utility columns
+            ui_df = ui_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
+            ui_df = ui_df.drop(columns=['Raw Goods', 'MatchScore'])
+            
+            st.session_state['bridging_results'] = ui_df
             st.session_state['lop_step'] = 3
             st.rerun()
 
-    # --- STEP 3: RESULTS TABLE & TERM EXPANSION ---
+    # --- STEP 3: RESULTS TABLE ---
     if st.session_state.get('lop_step') == 3:
         st.divider()
         st.markdown("### Step 3: Select Evidence")
+        st.write("Select the best records below to include in your Exhibit A.")
         
-        df = st.session_state.get('bridging_results', pd.DataFrame())
-        results_count = len(df)
+        df = st.session_state['bridging_results']
+        if "Select" not in df.columns:
+            df.insert(0, "Select", False)
         
-        # --- EXPANSION PROMPT IF LESS THAN 10 RESULTS ---
-        if results_count < 10:
-            st.warning(f"⚠️ **Found {results_count} bridging registration(s).** A strong Letter of Protest ideally includes 5–10 solid evidence marks.")
-            
-            with st.expander("🔍 **Expand Search with Related Terms** to get 10+ results", expanded=True):
-                st.write("Select or enter related USPTO terms to expand your bridging search:")
-                
-                raw_c = st.session_state.get('client_class', '').strip().zfill(3)
-                raw_t = st.session_state.get('applicant_class', '').strip().zfill(3)
-                
-                # Fetch dynamically related terms based on the user's checked keywords
-                term_clusters = load_expansion_clusters()
-                orig_c = st.session_state.get('primary_c_kws', [])
-                orig_t = st.session_state.get('primary_t_kws', [])
-                
-                suggested_c_terms = get_suggestions(orig_c, term_clusters)
-                suggested_t_terms = get_suggestions(orig_t, term_clusters)
-                
-                exp_col1, exp_col2 = st.columns(2)
-                with exp_col1:
-                    add_c_terms = st.multiselect(
-                        f"Additional Client (Class {raw_c}) Terms:",
-                        options=suggested_c_terms if suggested_c_terms else ["No CSV suggestions found"],
-                        default=suggested_c_terms[:3] if suggested_c_terms else [],
-                        key="add_c_terms",
-                        disabled=not suggested_c_terms
-                    )
-                    custom_c = st.text_input("Other Client Terms (comma-separated):", placeholder="e.g., hard cider, craft beer", key="custom_c")
-                
-                with exp_col2:
-                    add_t_terms = st.multiselect(
-                        f"Additional Applicant (Class {raw_t}) Terms:",
-                        options=suggested_t_terms if suggested_t_terms else ["No CSV suggestions found"],
-                        default=suggested_t_terms[:3] if suggested_t_terms else [],
-                        key="add_t_terms",
-                        disabled=not suggested_t_terms
-                    )
-                    custom_t = st.text_input("Other Applicant Terms (comma-separated):", placeholder="e.g., restaurant services, tavern", key="custom_t")
-
-                if st.button("🚀 Run Expanded Search", type="secondary"):
-                    # Combine original and new terms
-                    c_clean = list(orig_c)
-                    t_clean = list(orig_t)
-                    
-                    if suggested_c_terms: c_clean.extend(add_c_terms)
-                    if custom_c.strip(): c_clean.extend([x.strip() for x in custom_c.split(',') if x.strip()])
-                        
-                    if suggested_t_terms: t_clean.extend(add_t_terms)
-                    if custom_t.strip(): t_clean.extend([x.strip() for x in custom_t.split(',') if x.strip()])
-                        
-                    c_clean = list(set(c_clean))
-                    t_clean = list(set(t_clean))
-
-                    with st.spinner("Running expanded USPTO search..."):
-                        c_kw_str = " OR ".join([f'"{kw}"' for kw in c_clean])
-                        t_kw_str = " OR ".join([f'"{kw}"' for kw in t_clean])
-
-                        expanded_query = f'GS:({t_kw_str}) AND GS:({c_kw_str}) AND IC:{raw_c} AND IC:{raw_t} AND LD:true'
-                        excel_exp_out = "temp_expanded_bridging_search.xlsx"
-                        
-                        try:
-                            with sync_playwright() as p:
-                                browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-                                page = browser.new_page()
-                                _ = scrape_uspto(page=page, primary_query=expanded_query, excel_filename=excel_exp_out)
-                                browser.close()
-                        except Exception as e:
-                            st.error(f"Error during expanded search: {e}")
-                            st.stop()
-                            
-                        # Pass the original keywords to the processor so it can calculate the Tier Bonuses correctly!
-                        exp_df = process_uspto_excel_results(excel_exp_out, raw_c, raw_t, c_clean, t_clean, orig_c, orig_t)
-                        
-                        if exp_df.empty:
-                            st.warning("No additional registrations found with expanded terms.")
-                        else:
-                            # Merge with existing results if any existed
-                            if not df.empty:
-                                combined = pd.concat([df, exp_df.drop(columns=['Raw Goods', 'MatchScore'])], ignore_index=True)
-                                # Deduplicate by Registration Number
-                                combined = combined.drop_duplicates(subset=['Reg Number'], keep='first').reset_index(drop=True)
-                                st.session_state['bridging_results'] = combined
-                            else:
-                                exp_df = exp_df.sort_values(by='MatchScore', ascending=False).reset_index(drop=True)
-                                st.session_state['bridging_results'] = exp_df.drop(columns=['Raw Goods', 'MatchScore'])
-                                
-                            st.success(f"Updated results! Total registrations found: {len(st.session_state['bridging_results'])}")
-                            st.rerun()
-
-        # --- STEP 3 DISPLAY TABLE ---
-        if not df.empty:
-            st.write("Select the best records below to include in your Exhibit A.")
-            
-            if "Select" not in df.columns:
-                df.insert(0, "Select", False)
-            
-            edited_df = st.data_editor(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Select": st.column_config.CheckboxColumn("Select", help="Check to include in LOP"),
-                    "Filtered Goods": st.column_config.TextColumn("Filtered Goods", width="large")
-                }
-            )
+        # Configure the TextColumn to explicitly allow multiline text wrapping
+        edited_df = st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", help="Check to include in LOP"),
+                "Filtered Goods": st.column_config.TextColumn("Filtered Goods", width="large")
+            }
+        )
