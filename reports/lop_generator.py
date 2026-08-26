@@ -64,6 +64,9 @@ def parse_goods_to_df(raw_goods):
 # ==========================================
 # 3. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
+# ==========================================
+# 3. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
+# ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
     """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
     if not serial_number: return None, None
@@ -82,7 +85,7 @@ def fetch_tsdr_data(serial_number, target_classes):
                     ]
                 )
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                     viewport={"width": 1920, "height": 1080},
                     java_script_enabled=True
                 )
@@ -92,6 +95,7 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
+                # STANDARD DOM WAIT (No clicking, just waiting for the page to render)
                 try:
                     page.wait_for_selector("div.value", state="attached", timeout=15000)
                 except:
@@ -112,23 +116,27 @@ def fetch_tsdr_data(serial_number, target_classes):
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
+                    
+                    // STRATEGY 1: Standard TSDR div.key extraction
                     let keys = document.querySelectorAll('div.key');
                     for (let k of keys) {
-                        let text = k.textContent.trim();
-                        if (text === 'Mark:' || text === 'Word Mark:') {
+                        let text = k.textContent.trim().replace(/:/g, '');
+                        if (text === 'Mark' || text === 'Word Mark' || text === 'Literal Element') {
                             let val = k.nextElementSibling;
                             if (val && val.classList.contains('value')) {
                                 markName = val.textContent.trim();
-                                break;
+                                if (markName !== "") break;
                             }
                         }
                     }
+                    
                     let rows = document.querySelectorAll('div.row');
                     for (let row of rows) {
                         let keyNode = row.querySelector('div.key');
                         let valNode = row.querySelector('div.value');
                         if (keyNode && valNode) {
-                            if (keyNode.textContent.trim() === 'For:') {
+                            let text = keyNode.textContent.trim().replace(/:/g, '');
+                            if (text === 'For') {
                                 let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
                                 if (cleanGoods) {
                                     goodsArray.push(cleanGoods);
@@ -136,6 +144,42 @@ def fetch_tsdr_data(serial_number, target_classes):
                             }
                         }
                     }
+
+                    // STRATEGY 2: Fallback to Summary Table extraction (For newer/different TSDR layouts)
+                    if (markName === "Unknown Mark") {
+                        let tds = document.querySelectorAll('td, th');
+                        for (let i = 0; i < tds.length; i++) {
+                            let text = tds[i].textContent.trim().replace(/:/g, '');
+                            if (text === 'Mark' || text === 'Word Mark') {
+                                let nextNode = tds[i].nextElementSibling;
+                                if (nextNode) {
+                                    markName = nextNode.textContent.trim();
+                                    if (markName !== "") break;
+                                }
+                            }
+                        }
+                    }
+
+                    // STRATEGY 3: Ultimate Regex Fallback on raw page text
+                    if (markName === "Unknown Mark" || goodsArray.length === 0) {
+                        let fullText = document.body.innerText;
+                        
+                        if (markName === "Unknown Mark") {
+                            let mMatch = fullText.match(/(?:Mark|Word Mark|Literal Element):\\s*([^\\n]+)/i);
+                            if (mMatch && mMatch[1]) markName = mMatch[1].trim();
+                        }
+                        
+                        if (goodsArray.length === 0) {
+                            let forParts = fullText.split(/For:/i);
+                            if (forParts.length > 1) {
+                                for (let i = 1; i < forParts.length; i++) {
+                                    let chunk = forParts[i].split(/International Class:|Class Status:|US Class:|Filing Date:/i)[0].trim();
+                                    if (chunk) goodsArray.push(chunk.replace(/\\s+/g, ' '));
+                                }
+                            }
+                        }
+                    }
+                    
                     return { 
                         mark: markName, 
                         goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
@@ -149,8 +193,12 @@ def fetch_tsdr_data(serial_number, target_classes):
                 
                 browser.close()
                 
-                if mark_name == "Unknown Mark":
+                # BUG FIX: Only trigger a retry if BOTH failed completely. 
+                if mark_name == "Unknown Mark" and "Goods boundaries not found" in goods_text:
                     raise Exception("Page loaded but data was missing. Retrying...")
+                    
+                if mark_name == "Unknown Mark":
+                    mark_name = "[Design Mark / Unlabeled]"
                     
                 return mark_name, goods_text
                 
