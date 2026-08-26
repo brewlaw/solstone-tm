@@ -63,10 +63,10 @@ def parse_goods_to_df(raw_goods):
 
 
 # ==========================================
-# 3. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
+# 3. TMSearch INITIAL DATA SCRAPER (WEB UI)
 # ==========================================
-def fetch_tsdr_data(serial_number, target_classes):
-    """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
+def fetch_initial_data(serial_number):
+    """Scrapes tmsearch.uspto.gov details page directly using the DOM structure."""
     if not serial_number: return None, None
         
     max_retries = 3
@@ -75,110 +75,94 @@ def fetch_tsdr_data(serial_number, target_classes):
             with sync_playwright() as p:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=[
-                        '--no-sandbox', 
-                        '--disable-dev-shm-usage', 
-                        '--disable-gpu', 
-                        '--disable-blink-features=AutomationControlled'
-                    ]
+                    args=['--no-sandbox', '--disable-dev-shm-usage']
                 )
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     viewport={"width": 1920, "height": 1080},
                     java_script_enabled=True
                 )
-                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 page = context.new_page()
                 
-                url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-                page.goto(url, timeout=30000)
+                num_str = str(serial_number).strip()
                 
-                # THE BULLETPROOF WAIT: Do not proceed until the specific Serial Number appears on screen!
-                try:
-                    page.wait_for_selector(f"text='{serial_number}'", state="visible", timeout=15000)
-                except:
-                    try:
-                        # Fallback for search box entry
-                        page.locator('#searchNumber').fill(serial_number)
-                        page.locator('#searchNumber').press("Enter")
-                        page.wait_for_selector(f"text='{serial_number}'", state="visible", timeout=15000)
-                    except:
-                        pass 
+                # FAST PATH: If it's an 8-digit Serial Number, warp directly to the details page!
+                if len(num_str) == 8 and num_str.isdigit():
+                    page.goto(f"https://tmsearch.uspto.gov/search/search-results/{num_str}", timeout=30000)
+                else:
+                    # FALLBACK PATH: If it's a 7-digit Reg Number, use the search bar
+                    page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=30000)
+                    page.wait_for_timeout(2000)
                     
-                # Give it one extra second just to let the DOM fully settle
-                page.wait_for_timeout(1000) 
-                
-                if "Access Denied" in page.content():
-                    browser.close()
-                    raise Exception("USPTO Firewall Blocked the Connection.")
+                    search_input = page.locator('input[aria-label="Search field"], input[placeholder*="Search"]').first
+                    try:
+                        search_input.wait_for(state="visible", timeout=5000)
+                    except:
+                        builder = page.locator("text='Field tag and Search builder'").last
+                        if builder.is_visible(): builder.click(force=True)
+                        search_input = page.get_by_placeholder("Search using field tags").first
+                        
+                    query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
+                    search_input.fill(query)
+                    page.keyboard.press("Enter")
+                    
+                    # Wait for results and click the first hyperlink
+                    page.wait_for_selector("a[href*='/search-results/']", timeout=15000)
+                    page.locator("a[href*='/search-results/']").first.click()
 
-                # The original, clean, safe extraction logic
+                # THE BULLETPROOF WAIT: Wait for the exact Goods ID shown in the screenshot
+                page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
+                
+                # Execute Javascript to scrape the DOM elements based on the screenshots
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    let keys = document.querySelectorAll('.key');
-                    for (let k of keys) {
-                        let text = k.textContent.trim().replace(/:/g, '');
-                        if (text === 'Mark' || text === 'Word Mark' || text === 'Literal Element') {
-                            let val = k.nextElementSibling;
-                            if (val) {
-                                let cleanVal = val.textContent.trim();
-                                // Ignore the top search dropdown menu
-                                if (cleanVal && !cleanVal.includes("Ser No")) {
-                                    markName = cleanVal;
-                                    break;
-                                }
-                            }
+                    // 1. Mark Extraction (Based on image_135b60.jpg)
+                    let labels = Array.from(document.querySelectorAll('div, span, p, h2, h3, h4, label'));
+                    let wmLabel = labels.find(el => el.textContent.trim() === 'Wordmark' || el.textContent.trim() === 'Mark');
+                    if (wmLabel && wmLabel.nextElementSibling) {
+                        markName = wmLabel.nextElementSibling.textContent.trim();
+                    }
+                    
+                    // 2. Goods Extraction (Based on image_135b20.jpg)
+                    let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
+                    if (goodsBox) {
+                        // The screenshot shows the goods inside a <p class="mb-1">
+                        let pTags = goodsBox.querySelectorAll('p.mb-1, p.mb-2, p');
+                        if (pTags.length > 0) {
+                            pTags.forEach(p => {
+                                let text = p.textContent.trim().replace(/\\s+/g, ' ');
+                                if (text) goodsArray.push(text);
+                            });
+                        } else {
+                            // Fallback if the <p> tags are ever removed
+                            goodsArray.push(goodsBox.textContent.trim().replace(/\\s+/g, ' '));
                         }
                     }
                     
-                    let rows = document.querySelectorAll('.row');
-                    for (let row of rows) {
-                        let keyNode = row.querySelector('.key');
-                        let valNode = row.querySelector('.value');
-                        if (keyNode && valNode) {
-                            let text = keyNode.textContent.trim().replace(/:/g, '');
-                            if (text === 'For') {
-                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
-                                if (cleanGoods) {
-                                    goodsArray.push(cleanGoods);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Deduplicate identical goods clauses
-                    goodsArray = [...new Set(goodsArray)];
-                    
-                    return { 
-                        mark: markName, 
-                        goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found. Please manually copy from TSDR."
+                    return {
+                        mark: markName,
+                        goods: goodsArray.length > 0 ? goodsArray.join("\\n\\n") : "Goods boundaries not found."
                     };
                 }
                 """
                 
                 result = page.evaluate(js_extract)
-                mark_name = result.get('mark', 'Unknown Mark')
-                goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
-                
                 browser.close()
                 
-                if mark_name == "Unknown Mark" and "Goods boundaries not found" in goods_text:
-                    raise Exception("Page loaded but data was missing. Retrying...")
+                if result['mark'] == "Unknown Mark" and "Goods boundaries not found" in result['goods']:
+                    raise Exception("Data not found on the page.")
                     
-                if mark_name == "Unknown Mark":
-                    mark_name = "[Design Mark / Unlabeled]"
-                    
-                return mark_name, goods_text
+                return result['mark'], result['goods']
                 
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2)
                 continue
             else:
-                return None, f"Error fetching data after 3 attempts: {str(e)}"
+                return None, f"Error fetching data from TMSearch: {str(e)}"
 
 # ==========================================
 # 4. HELPER: CLEAN & SCORE RESULTS (TIERED)
