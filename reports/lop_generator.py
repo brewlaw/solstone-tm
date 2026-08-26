@@ -93,59 +93,64 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
-                # Give the basic TSDR framework a moment to render
-                page.wait_for_timeout(3000)
-                
-                # SAFELY attempt to click "Expand All" to reveal hidden Goods
-                # If it takes more than 3 seconds to find the button, it ignores it and moves on without crashing.
+                # The original bulletproof wait logic
+                try:
+                    page.wait_for_selector("div.value", state="attached", timeout=15000)
+                except:
+                    try:
+                        page.locator('#searchNumber').fill(serial_number)
+                        page.locator('#searchNumber').press("Enter")
+                        page.wait_for_selector("div.value", state="attached", timeout=15000)
+                    except:
+                        pass 
+                    
+                page.wait_for_timeout(2000) 
+
+                # SAFE EXPAND: Soft click to reveal hidden goods. Fails silently without breaking the script.
                 try:
                     expand_btn = page.locator("text='Expand All'").first
-                    if expand_btn.is_visible(timeout=3000):
+                    if expand_btn.is_visible(timeout=2000):
                         expand_btn.click(force=True)
-                        page.wait_for_timeout(1000) # Quick pause to let the animation finish opening
+                        page.wait_for_timeout(1000)
                 except:
-                    pass 
-                    
+                    pass
+                
                 if "Access Denied" in page.content():
                     browser.close()
                     raise Exception("USPTO Firewall Blocked the Connection.")
 
+                # RESTORED: The original, perfect Javascript extraction logic
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    // Look through every valid container on the page
-                    let elements = document.querySelectorAll('.key, .label, td, th, div');
-                    for (let el of elements) {
-                        let text = el.textContent.trim();
-                        
-                        // 1. STRICT Mark Name Extraction
-                        if (text === 'Mark:' || text === 'Word Mark:' || text === 'Literal Element:') {
-                            let nextNode = el.nextElementSibling;
-                            if (nextNode) {
-                                let val = nextNode.textContent.trim().replace(/\\s+/g, ' ');
-                                // Ensure it didn't accidentally grab the 'Ser No' dropdown UI
-                                if (val && !val.includes("Ser No") && !val.includes("Serial,") && val.length > 0) {
-                                    markName = val;
-                                }
-                            }
-                        }
-                        
-                        // 2. STRICT Goods Extraction
-                        if (text === 'For:') {
-                            let nextNode = el.nextElementSibling;
-                            if (nextNode) {
-                                let val = nextNode.textContent.trim().replace(/\\s+/g, ' ');
-                                if (val) {
-                                    goodsArray.push(val);
-                                }
+                    let keys = document.querySelectorAll('div.key');
+                    for (let k of keys) {
+                        let text = k.textContent.trim();
+                        if (text === 'Mark:' || text === 'Word Mark:') {
+                            let val = k.nextElementSibling;
+                            if (val && val.classList.contains('value')) {
+                                markName = val.textContent.trim();
+                                break;
                             }
                         }
                     }
                     
-                    // Deduplicate identical goods clauses just in case TSDR rendered them twice
-                    goodsArray = [...new Set(goodsArray)];
+                    let rows = document.querySelectorAll('div.row');
+                    for (let row of rows) {
+                        let keyNode = row.querySelector('div.key');
+                        let valNode = row.querySelector('div.value');
+                        
+                        if (keyNode && valNode) {
+                            if (keyNode.textContent.trim() === 'For:') {
+                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
+                                if (cleanGoods) {
+                                    goodsArray.push(cleanGoods);
+                                }
+                            }
+                        }
+                    }
                     
                     return { 
                         mark: markName, 
@@ -160,11 +165,9 @@ def fetch_tsdr_data(serial_number, target_classes):
                 
                 browser.close()
                 
-                # If everything failed, trigger the retry loop
                 if mark_name == "Unknown Mark" and "Goods boundaries not found" in goods_text:
                     raise Exception("Page loaded but data was missing. Retrying...")
                     
-                # If only the mark name is missing (Design Mark), label it appropriately
                 if mark_name == "Unknown Mark":
                     mark_name = "[Design Mark / Unlabeled]"
                     
