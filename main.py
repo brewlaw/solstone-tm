@@ -8,7 +8,7 @@ from utils.saved_searches import get_saved_searches, delete_saved_search
 st.set_page_config(page_title="Solstone IP Suite", layout="wide", page_icon="⚖️")
 
 if os.path.exists("logo.jpg"):
-    st.sidebar.image("logo.jpg", use_container_width=True)
+    st.sidebar.image("logo.jpg", width="stretch"width="stretch")
 
 st.sidebar.title("Solstone IP Tools")
 st.sidebar.caption("Brew Law IP Suite")
@@ -109,12 +109,12 @@ def show_saved_monitoring():
             last_run = params.get('last_run', 'Never')
             st.markdown(f'<div class="monitoring-row-sub">{last_run}</div>', unsafe_allow_html=True)
         with col6:
-            if st.button("Run Sweep", key=f"run_{name}", use_container_width=True, type="primary"):
+            if st.button("Run Sweep", key=f"run_{name}", width="stretch", type="primary"):
                 st.session_state['load_monitoring_key'] = name
                 st.session_state['main_tool_router'] = "Trademark Monitoring Suite"
                 st.rerun()
         with col7:
-            if st.button("Delete", key=f"del_prof_{name}", use_container_width=True):
+            if st.button("Delete", key=f"del_prof_{name}", width="stretch"):
                 delete_saved_search(name)
                 st.toast(f"Profile '{name}' deleted!")
                 st.rerun()
@@ -144,7 +144,7 @@ def show_drive_archive():
             st.markdown(f"[🔗 View in Drive]({file['webViewLink']})")
             
         with col3:
-            if st.button("🗑️ Delete", key=f"del_{file['id']}", use_container_width=True):
+            if st.button("🗑️ Delete", key=f"del_{file['id']}", width="stretch"):
                 with st.spinner("Moving to trash..."):
                     if trash_drive_file(file['id']):
                         st.toast(f"Report moved to trash!")

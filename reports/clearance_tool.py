@@ -200,7 +200,7 @@ def run():
                 c_data['pdf_bytes'],
                 file_name=f"{c_data['base_filename']}.pdf",
                 mime="application/pdf",
-                use_container_width=True
+                width="stretch"
             )
         with col_d2:
             st.download_button(
@@ -208,10 +208,10 @@ def run():
                 c_data['docx_bytes'],
                 file_name=f"{c_data['base_filename']}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
+                width="stretch"
             )
         with col_d3:
-            if st.button("☁️ Archive to Google Drive", use_container_width=True, key="archive_clearance"):
+            if st.button("☁️ Archive to Google Drive", width="stretch", key="archive_clearance"):
                 from utils.drive_uploader import upload_to_drive
                 with st.spinner("Archiving reports to Google Drive..."):
                     pdf_link = upload_to_drive(c_data['pdf_filename'])

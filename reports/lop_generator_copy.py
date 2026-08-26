@@ -254,7 +254,7 @@ def run():
         
         edited_df = st.data_editor(
             df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", help="Check to include in LOP"),

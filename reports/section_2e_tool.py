@@ -70,10 +70,10 @@ def run():
                 data=data['report_content'],
                 file_name=os.path.basename(data['report_filename']),
                 mime="text/plain",
-                use_container_width=True
+                width="stretch"
             )
         with col2:
-            if st.button("☁️ Archive to Google Drive", use_container_width=True, key="archive_2e"):
+            if st.button("☁️ Archive to Google Drive", width="stretch", key="archive_2e"):
                 from utils.drive_uploader import upload_to_drive
                 with st.spinner("Archiving analysis to Google Drive..."):
                     drive_link = upload_to_drive(data['report_filename'])

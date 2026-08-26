@@ -338,7 +338,7 @@ def run():
                 data=data['html_report'],
                 file_name=f"Trademark_Report_{data['owner_name'].replace(' ', '_')}.html",
                 mime="text/html",
-                use_container_width=True
+                width="stretch"
             )
             
         with dl_col2:
@@ -347,7 +347,7 @@ def run():
                 data=data['docx_bytes'],
                 file_name=data['proper_filename_docx'],
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
+                width="stretch"
             )
 
         with dl_col3:
@@ -356,11 +356,11 @@ def run():
                 data=data['pdf_bytes'],
                 file_name=data['proper_filename'],
                 mime="application/pdf",
-                use_container_width=True
+                width="stretch"
             )
 
         with dl_col4:
-            if st.button("☁️ Archive to Drive", use_container_width=True):
+            if st.button("☁️ Archive to Drive", width="stretch"):
                 from utils.drive_uploader import upload_to_drive
                 with st.spinner("Archiving reports..."):
                     with open(data['proper_filepath'], "wb") as f:
