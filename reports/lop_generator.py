@@ -10,37 +10,29 @@ from playwright.sync_api import sync_playwright
 from scrapers.uspto_scraper import scrape_uspto
 
 # ==========================================
-# 1. HELPER: LOAD EXPANSION CLUSTERS FROM CSV
+# 1. HELPER: PARSE GOODS INTO CHECKLIST
 # ==========================================
-@st.cache_data
-def load_expansion_clusters():
-    """Loads related term clusters from a CSV file where terms are in separate columns across a row."""
-    csv_path = "data/expansion_terms.csv" 
-    clusters = []
+def parse_goods_to_df(raw_goods):
+    """Splits raw goods text by semicolons/newlines into a DataFrame for the checklist UI."""
+    if not raw_goods or "Goods boundaries not found" in raw_goods:
+        return pd.DataFrame({"Select": [False], "Keyword": [raw_goods]})
     
-    if os.path.exists(csv_path):
-        try:
-            df = pd.read_csv(csv_path, header=None)
-            for _, row in df.iterrows():
-                cluster = [str(val).strip().lower() for val in row.values if pd.notna(val) and str(val).strip()]
-                if cluster:
-                    clusters.append(cluster)
-        except Exception as e:
-            st.error(f"Error loading expansion terms CSV: {e}")
-            
-    return clusters
-
-def get_suggestions(keywords, clusters):
-    """Finds all related terms if any searched keyword exists in a cluster."""
-    suggestions = set()
-    kw_lower = {k.strip().lower() for k in keywords}
+    # Split by semicolon or new line
+    raw_items = re.split(r'[;\n]', raw_goods)
     
-    for cluster in clusters:
-        if kw_lower.intersection(cluster):
-            suggestions.update(cluster)
+    cleaned_items = []
+    for item in raw_items:
+        clean_item = item.strip()
+        if clean_item:
+            cleaned_items.append(clean_item)
             
-    suggestions = suggestions - kw_lower
-    return sorted(list(suggestions))
+    seen = set()
+    unique_items = [x for x in cleaned_items if not (x in seen or seen.add(x))]
+    
+    if not unique_items:
+        return pd.DataFrame({"Select": [], "Keyword": []})
+        
+    return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
 # 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
