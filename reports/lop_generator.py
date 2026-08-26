@@ -63,10 +63,10 @@ def parse_goods_to_df(raw_goods):
 
 
 # ==========================================
-# 3. TMSearch INITIAL DATA SCRAPER (FRONT DOOR WEB UI)
+# 3. TMSearch INITIAL DATA SCRAPER (DOM EXTRACTION)
 # ==========================================
 def fetch_initial_data(serial_number):
-    """Scrapes tmsearch.uspto.gov details by navigating through the search box to build the session."""
+    """Scrapes tmsearch.uspto.gov by mimicking the exact search flow of uspto_scraper, then reading the DOM."""
     if not serial_number: return None, None
         
     max_retries = 3
@@ -77,65 +77,62 @@ def fetch_initial_data(serial_number):
                     headless=True,
                     args=['--no-sandbox', '--disable-dev-shm-usage']
                 )
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    viewport={"width": 1920, "height": 1080},
-                    java_script_enabled=True
-                )
-                page = context.new_page()
+                page = browser.new_page()
                 
-                num_str = str(serial_number).strip()
+                # 1. Exact navigation and waits from uspto_scraper.py
+                page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=45000, wait_until="domcontentloaded")
+                time.sleep(2)
+
+                # 2. Exact search field targeting from uspto_scraper.py
+                search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
                 
-                # FORCE NATURAL NAVIGATION: Go to the homepage to get the session token
-                page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=30000)
-                page.wait_for_timeout(2000)
-                
-                search_input = page.locator('input[aria-label="Search field"], input[placeholder*="Search"]').first
                 try:
                     search_input.wait_for(state="visible", timeout=5000)
                 except:
-                    builder = page.locator("text='Field tag and Search builder'").last
-                    if builder.is_visible(): builder.click(force=True)
+                    builder_toggle = page.locator("text='Field tag and Search builder'").last
+                    if builder_toggle.is_visible():
+                        builder_toggle.click(force=True)
+                        time.sleep(1)
                     search_input = page.get_by_placeholder("Search using field tags").first
-                    
+                    search_input.wait_for(state="visible", timeout=10000)
+
+                # Format the SN or RN query
+                num_str = str(serial_number).strip()
                 query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
+                
+                # 3. Fill, search, and wait exactly like uspto_scraper.py
                 search_input.fill(query)
-                
-                # Hit enter to run the search
                 page.keyboard.press("Enter")
+                time.sleep(4) 
                 
-                # Because there is only 1 result, TMSearch instantly loads the detailed view!
-                # Do NOT wait for a link. Just wait for the Goods container to appear on screen.
+                # 4. Wait for the goods container to load on the single-result screen
                 page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
                 
-                # Execute Javascript to scrape the DOM elements based on the screenshots
+                # 5. Extract directly from DOM and clean the text
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    // 1. Mark Extraction 
+                    // Grab Mark Name
                     let labels = Array.from(document.querySelectorAll('div, span, p, h2, h3, h4, label'));
                     let wmLabel = labels.find(el => el.textContent.trim() === 'Wordmark' || el.textContent.trim() === 'Mark');
                     if (wmLabel && wmLabel.nextElementSibling) {
                         markName = wmLabel.nextElementSibling.textContent.trim();
                     }
                     
-                    // 2. Goods Extraction (With Prefix/Date Cleanup included)
+                    // Grab Goods and strip Class numbers & dates
                     let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
                     if (goodsBox) {
                         let pTags = goodsBox.querySelectorAll('p.mb-1, p.mb-2, p');
                         if (pTags.length > 0) {
                             pTags.forEach(p => {
                                 let text = p.textContent.trim().replace(/\\s+/g, ' ');
-                                // Strip the "IC 032:" prefix
                                 text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
-                                // Chop off the First Use dates (everything after the | symbol)
                                 text = text.split('|')[0].trim();
                                 if (text) goodsArray.push(text);
                             });
                         } else {
-                            // Fallback
                             let text = goodsBox.textContent.trim().replace(/\\s+/g, ' ');
                             text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
                             text = text.split('|')[0].trim();
@@ -143,19 +140,13 @@ def fetch_initial_data(serial_number):
                         }
                     }
                     
-                    return {
-                        mark: markName,
-                        goods: goodsArray.length > 0 ? goodsArray.join("; ") : "Goods boundaries not found."
-                    };
+                    return { mark: markName, goods: goodsArray.length > 0 ? goodsArray.join("; ") : "Goods boundaries not found." };
                 }
                 """
                 
                 result = page.evaluate(js_extract)
                 browser.close()
                 
-                if result['mark'] == "Unknown Mark" and "Goods boundaries not found" in result['goods']:
-                    raise Exception("Data not found on the page.")
-                    
                 return result['mark'], result['goods']
                 
         except Exception as e:
