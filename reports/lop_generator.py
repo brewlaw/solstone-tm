@@ -9,19 +9,47 @@ from playwright.sync_api import sync_playwright
 # Import your actual USPTO scraper
 from scrapers.uspto_scraper import scrape_uspto
 
-# Default related terms lookup for popular classes
-DEFAULT_RELATED_TERMS = {
-    "032": ["malt beverages", "ale", "porter", "stout", "lager", "hard seltzer", "non-alcoholic beverages", "fruit-flavored beverages", "cider"],
-    "043": ["bar services", "restaurant services", "cocktail lounge services", "pub services", "taproom services", "catering", "bar and restaurant services"],
-    "033": ["alcoholic beverages", "wine", "spirits", "liquor", "cocktails", "distilled spirits", "vodka", "whiskey"],
-    "030": ["coffee", "tea", "bakery goods", "confectionery", "snacks", "sauces"],
-    "025": ["clothing", "shirts", "hats", "apparel", "footwear", "headwear"],
-    "035": ["retail store services", "online retail store services", "advertising services"],
-    "041": ["entertainment services", "organizing events", "nightclub services"]
-}
+# ==========================================
+# 1. HELPER: LOAD EXPANSION CLUSTERS FROM CSV
+# ==========================================
+@st.cache_data
+def load_expansion_clusters():
+    """Loads related term clusters from a CSV file where terms are in separate columns across a row."""
+    # Updated to look in the data folder!
+    csv_path = "data/expansion_terms.csv" 
+    clusters = []
+    
+    if os.path.exists(csv_path):
+        try:
+            # Read CSV without assuming headers
+            df = pd.read_csv(csv_path, header=None)
+            for _, row in df.iterrows():
+                # Grab every valid cell across the entire row, ignore empty cells (NaN)
+                cluster = [str(val).strip().lower() for val in row.values if pd.notna(val) and str(val).strip()]
+                if cluster:
+                    clusters.append(cluster)
+        except Exception as e:
+            st.error(f"Error loading expansion terms CSV: {e}")
+            
+    return clusters
+
+def get_suggestions(keywords, clusters):
+    """Finds all related terms if any searched keyword exists in a cluster."""
+    suggestions = set()
+    kw_lower = {k.strip().lower() for k in keywords}
+    
+    for cluster in clusters:
+        # If any of the searched keywords intersect with this cluster...
+        if kw_lower.intersection(cluster):
+            # Add ALL terms from that cluster into suggestions
+            suggestions.update(cluster)
+            
+    # Remove the keywords we already searched from the suggestions list
+    suggestions = suggestions - kw_lower
+    return sorted(list(suggestions))
 
 # ==========================================
-# 1. HELPER: PARSE GOODS INTO CHECKLIST
+# 2. HELPER: PARSE GOODS INTO CHECKLIST
 # ==========================================
 def parse_goods_to_df(raw_goods):
     """Splits raw goods text by semicolons/newlines into a DataFrame for the checklist UI."""
@@ -40,7 +68,7 @@ def parse_goods_to_df(raw_goods):
     return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
 
 # ==========================================
-# 2. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
+# 3. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
 # ==========================================
 def fetch_tsdr_data(serial_number, target_classes):
     """Scrapes TSDR with a 3-attempt automatic retry loop to bypass intermittent USPTO blocks."""
@@ -140,7 +168,7 @@ def fetch_tsdr_data(serial_number, target_classes):
                 return None, f"Error fetching data after 3 attempts: {str(e)}"
 
 # ==========================================
-# 3. HELPER: CLEAN & SCORE RESULTS
+# 4. HELPER: CLEAN & SCORE RESULTS
 # ==========================================
 def clean_goods_exact_scored(text, c_cls, t_cls, c_kws, t_kws):
     """Filters goods to relevant classes, isolates exact matches, and assigns a ranking score."""
@@ -360,16 +388,9 @@ def run():
             excel_out = "temp_bridging_search.xlsx" 
             try:
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(
-                        headless=True,
-                        args=['--no-sandbox', '--disable-dev-shm-usage']
-                    )
+                    browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
                     page = browser.new_page()
-                    _ = scrape_uspto(
-                        page=page,
-                        primary_query=search_query,
-                        excel_filename=excel_out
-                    )
+                    _ = scrape_uspto(page=page, primary_query=search_query, excel_filename=excel_out)
                     browser.close()
             except Exception as e:
                 st.error(f"Error scraping USPTO: {e}")
@@ -406,26 +427,29 @@ def run():
                 raw_c = st.session_state.get('client_class', '').strip().zfill(3)
                 raw_t = st.session_state.get('applicant_class', '').strip().zfill(3)
                 
-                # Fetch default terms for the classes
-                default_c_terms = DEFAULT_RELATED_TERMS.get(raw_c.lstrip('0'), ["goods", "products"])
-                default_t_terms = DEFAULT_RELATED_TERMS.get(raw_t.lstrip('0'), ["services", "providing services"])
+                # Fetch dynamically related terms based on the user's checked keywords
+                term_clusters = load_expansion_clusters()
+                suggested_c_terms = get_suggestions(st.session_state.get('primary_c_kws', []), term_clusters)
+                suggested_t_terms = get_suggestions(st.session_state.get('primary_t_kws', []), term_clusters)
                 
                 exp_col1, exp_col2 = st.columns(2)
                 with exp_col1:
                     add_c_terms = st.multiselect(
                         f"Additional Client (Class {raw_c}) Terms:",
-                        options=default_c_terms,
-                        default=[t for t in default_c_terms[:3] if t not in st.session_state.get('primary_c_kws', [])],
-                        key="add_c_terms"
+                        options=suggested_c_terms if suggested_c_terms else ["No CSV suggestions found"],
+                        default=suggested_c_terms[:3] if suggested_c_terms else [],
+                        key="add_c_terms",
+                        disabled=not suggested_c_terms
                     )
                     custom_c = st.text_input("Other Client Terms (comma-separated):", placeholder="e.g., hard cider, craft beer", key="custom_c")
                 
                 with exp_col2:
                     add_t_terms = st.multiselect(
                         f"Additional Applicant (Class {raw_t}) Terms:",
-                        options=default_t_terms,
-                        default=[t for t in default_t_terms[:3] if t not in st.session_state.get('primary_t_kws', [])],
-                        key="add_t_terms"
+                        options=suggested_t_terms if suggested_t_terms else ["No CSV suggestions found"],
+                        default=suggested_t_terms[:3] if suggested_t_terms else [],
+                        key="add_t_terms",
+                        disabled=not suggested_t_terms
                     )
                     custom_t = st.text_input("Other Applicant Terms (comma-separated):", placeholder="e.g., restaurant services, tavern", key="custom_t")
 
@@ -434,13 +458,11 @@ def run():
                     c_clean = list(st.session_state.get('primary_c_kws', []))
                     t_clean = list(st.session_state.get('primary_t_kws', []))
                     
-                    c_clean.extend(add_c_terms)
-                    if custom_c.strip():
-                        c_clean.extend([x.strip() for x in custom_c.split(',') if x.strip()])
+                    if suggested_c_terms: c_clean.extend(add_c_terms)
+                    if custom_c.strip(): c_clean.extend([x.strip() for x in custom_c.split(',') if x.strip()])
                         
-                    t_clean.extend(add_t_terms)
-                    if custom_t.strip():
-                        t_clean.extend([x.strip() for x in custom_t.split(',') if x.strip()])
+                    if suggested_t_terms: t_clean.extend(add_t_terms)
+                    if custom_t.strip(): t_clean.extend([x.strip() for x in custom_t.split(',') if x.strip()])
                         
                     c_clean = list(set(c_clean))
                     t_clean = list(set(t_clean))
