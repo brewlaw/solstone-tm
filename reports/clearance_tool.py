@@ -23,6 +23,9 @@ def run():
         st.session_state['clearance_report_data'] = None
 
     col1, col2 = st.columns(2)
+    # Insert this right before line 27:
+    def_client = st.session_state.get("client_name", "")
+    client_name = st.text_input("Client Name:", value=def_client)
     with col1:
         client_name = st.text_input("Client Name:", value=def_client)
         attention_name = st.text_input("Attention Name (e.g. Adeline Druart):", value=def_attn)
