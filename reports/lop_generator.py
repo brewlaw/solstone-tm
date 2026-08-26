@@ -388,118 +388,82 @@ def generate_exhibit_cover_pdf(selected_df):
 # 4. HELPER: AUTOMATED TSDR PDF DOWNLOAD VIA DIRECT ENDPOINTS & PLAYWRIGHT
 # ==========================================
 def download_official_tsdr_pdfs_batch(selected_df):
-  """Attempts direct HTTP fetch first, then Playwright automation with short timeouts to avoid long cloud hangs."""
+  """Automates Playwright to navigate TSDR, wait for full record load, click 'Download > Status (PDF)', and capture official USPTO PDFs."""
   pdf_dict = {}
   errors = []
 
-  # Fast HTTP headers to mimic residential browser
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      ),
-      "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  }
+  with sync_playwright() as p:
+    try:
+      browser = p.chromium.launch(
+          headless=True,
+          args=[
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-gpu",
+              "--disable-blink-features=AutomationControlled",
+          ],
+      )
+      context = browser.new_context(
+          user_agent=(
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+              " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+          ),
+          viewport={"width": 1920, "height": 1080},
+      )
+      page = context.new_page()
 
-  pending_rows = []
-
-  # Phase 1: Try direct API/PDF endpoints (Fast)
-  for _, row in selected_df.iterrows():
-    reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
-    sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
-    num_to_use = (
-        reg_num
-        if reg_num and reg_num.lower() != "nan" and reg_num != ""
-        else sn_num
-    )
-
-    if not num_to_use or num_to_use.lower() == "nan":
-      continue
-
-    id_type = (
-        "rn" if reg_num and reg_num.lower() != "nan" and reg_num != "" else "sn"
-    )
-    direct_urls = [
-        f"https://tsdrapi.uspto.gov/ts/cd/casestatus/{id_type}{num_to_use}/content.pdf",
-        f"https://tsdr.uspto.gov/status_pdf?caseNumber={num_to_use}&caseSearchType=US_APPLICATION",
-    ]
-
-    fetched = False
-    for url in direct_urls:
-      try:
-        r = requests.get(url, headers=headers, timeout=3)
-        if (
-            r.status_code == 200
-            and len(r.content) > 1000
-            and r.content.startswith(b"%PDF")
-        ):
-          pdf_dict[num_to_use] = r.content
-          fetched = True
-          break
-      except Exception:
-        pass
-
-    if not fetched:
-      pending_rows.append((num_to_use, row))
-
-  # Phase 2: If direct requests were blocked by Akamai, try Playwright with a short 5s timeout
-  if pending_rows:
-    with sync_playwright() as p:
-      try:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-            ],
+      for _, row in selected_df.iterrows():
+        reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+        sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+        num_to_use = (
+            reg_num
+            if reg_num and reg_num.lower() != "nan" and reg_num != ""
+            else sn_num
         )
-        context = browser.new_context(
-            user_agent=headers["User-Agent"],
-            viewport={"width": 1920, "height": 1080},
-        )
-        page = context.new_page()
 
-        for num_to_use, _ in pending_rows:
-          try:
-            page.goto(
-                f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch",
-                timeout=6000,
-            )
-            page.wait_for_selector("text=Generated on:", timeout=5000)
+        if not num_to_use or num_to_use.lower() == "nan":
+          continue
 
-            download_menu = page.locator("a:has-text('Download')").first
-            download_menu.click()
-            page.wait_for_timeout(500)
+        try:
+          # 1. Direct navigate to TSDR case URL
+          tsdr_url = f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+          page.goto(tsdr_url, timeout=25000)
 
-            with page.expect_download(timeout=5000) as download_info:
-              inner_download_btn = page.locator("a:has-text('Download')").last
-              inner_download_btn.click()
+          # 2. Wait up to 15s for TSDR dynamic content rendering
+          page.wait_for_selector("text=Generated on:", timeout=15000)
+          page.wait_for_timeout(1000)
 
-            download = download_info.value
-            with open(download.path(), "rb") as f:
-              pdf_bytes = f.read()
+          # 3. Click the main "Download" dropdown button
+          download_menu = page.locator(
+              "a:has-text('Download'), button:has-text('Download')"
+          ).first
+          download_menu.click()
+          page.wait_for_timeout(600)
 
-            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-              pdf_dict[num_to_use] = pdf_bytes
-            else:
-              errors.append(
-                  f"Reg #{num_to_use}: Akamai firewall blocked cloud automated"
-                  " download."
-              )
-          except Exception:
+          # 4. Trigger download event and capture PDF bytes
+          with page.expect_download(timeout=15000) as download_info:
+            inner_download_btn = page.locator(
+                "a:has-text('Download'), input[value='Download']"
+            ).last
+            inner_download_btn.click()
+
+          download = download_info.value
+          with open(download.path(), "rb") as f:
+            pdf_bytes = f.read()
+
+          if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+            pdf_dict[num_to_use] = pdf_bytes
+          else:
             errors.append(
-                f"Reg #{num_to_use}: Akamai firewall blocked cloud automated"
-                " download."
+                f"Reg #{num_to_use}: Captured file was not a valid PDF."
             )
 
-        browser.close()
-      except Exception as e:
-        for num_to_use, _ in pending_rows:
-          errors.append(
-              f"Reg #{num_to_use}: Akamai firewall blocked cloud browser."
-          )
+        except Exception as e:
+          errors.append(f"Reg #{num_to_use}: {str(e)}")
+
+      browser.close()
+    except Exception as e:
+      errors.append(f"Browser automation error: {str(e)}")
 
   return pdf_dict, errors
 
