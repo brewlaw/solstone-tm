@@ -11,10 +11,10 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 import streamlit as st
 
-# Import your actual USPTO scraper for Step 2
+# Import USPTO scraper from scrapers directory
 from scrapers.uspto_scraper import scrape_uspto
 
-# Default related terms lookup for popular classes
+# Related terms lookup for bridging search expansion
 DEFAULT_RELATED_TERMS = {
     "032": [
         "malt beverages",
@@ -72,7 +72,10 @@ DEFAULT_RELATED_TERMS = {
 # 0. HELPER: OWNER NAME NORMALIZATION
 # ==========================================
 def normalize_owner_name(owner_str):
-  """Strips entity types, brackets, parentheses, addresses, and corporate suffixes to create a canonical key for 100% owner deduplication."""
+  """Strips entity types, brackets, parentheses, addresses, and corporate suffixes
+
+  to create a canonical key for 100% owner deduplication.
+  """
   if not isinstance(owner_str, str) or not owner_str.strip():
     return ""
   base_name = re.split(r"[\(\[\;\,]", owner_str)[0]
@@ -385,10 +388,10 @@ def generate_exhibit_cover_pdf(selected_df):
 
 
 # ==========================================
-# 4. HELPER: AUTOMATED TSDR PDF DOWNLOAD VIA DIRECT ENDPOINTS & PLAYWRIGHT
+# 4. HELPER: AUTOMATED TSDR PDF DOWNLOAD VIA EXACT DEVTOOLS SELECTORS
 # ==========================================
 def download_official_tsdr_pdfs_batch(selected_df):
-  """Automates Playwright to navigate TSDR, wait for full record load, click 'Download > Status (PDF)', and capture official USPTO PDFs."""
+  """Automates Playwright to navigate TSDR, wait for full record load, and click exact DevTools ID/attribute selectors to capture official USPTO PDFs."""
   pdf_dict = {}
   errors = []
 
@@ -425,33 +428,35 @@ def download_official_tsdr_pdfs_batch(selected_df):
           continue
 
         try:
-          
-            # 1. Open TSDR page
-            tsdr_url = f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-            page.goto(tsdr_url, timeout=25000)
+          # 1. Direct navigate to TSDR status page
+          tsdr_url = f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+          page.goto(tsdr_url, timeout=25000)
 
-            # 2. Wait for status content to load
-            page.wait_for_selector("a[data-event-label='DownloadContentBtn']", timeout=15000)
+          # 2. Wait up to 15s for exact Download link attribute from DevTools
+          page.wait_for_selector(
+              "a[data-event-label='DownloadContentBtn']", timeout=15000
+          )
+          page.click("a[data-event-label='DownloadContentBtn']")
+          page.wait_for_timeout(500)
 
-            # 3. Click the exact dropdown header link
-            page.click("a[data-event-label='DownloadContentBtn']")
-            page.wait_for_timeout(500)
+          # 3. Trigger download via exact submit button ID from DevTools (#downloadSubmit)
+          with page.expect_download(timeout=15000) as download_info:
+            page.click("#downloadSubmit")
 
-            # 4. Click the exact button ID to download the PDF
-            with page.expect_download(timeout=15000) as download_info:
-                page.click("#downloadSubmit")
+          download = download_info.value
+          with open(download.path(), "rb") as f:
+            pdf_bytes = f.read()
 
-            download = download_info.value
-            with open(download.path(), "rb") as f:
-                pdf_bytes = f.read()
-
-            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-                pdf_dict[num_to_use] = pdf_bytes
-            else:
-                errors.append(
+          if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+            pdf_dict[num_to_use] = pdf_bytes
+          else:
+            errors.append(
                 f"Reg #{num_to_use}: Captured file was not a valid PDF."
             )
-      
+
+        except Exception as e:
+          errors.append(f"Reg #{num_to_use}: {str(e)}")
+
       browser.close()
     except Exception as e:
       errors.append(f"Browser automation error: {str(e)}")
@@ -913,7 +918,6 @@ def run():
               width="stretch",
           )
 
-          # If Akamai blocked any automated cloud downloads, show direct links + 1-click uploader
           if st.session_state.get("download_errors"):
             st.divider()
             st.warning(
@@ -976,3 +980,8 @@ def run():
                   type="primary",
                   width="stretch",
               )
+
+
+# Standalone execution entry point
+if __name__ == "__main__":
+  run()
