@@ -26,7 +26,7 @@ def run():
   if "clearance_report_data" not in st.session_state:
     st.session_state["clearance_report_data"] = None
 
-  # Define default values safely from session state
+  # Initialize default values safely from session state
   def_client = st.session_state.get("client_name", "")
   def_attn = st.session_state.get("attention_name", "")
   def_email = st.session_state.get("client_email", "")
@@ -78,7 +78,9 @@ def run():
         "Root Substring / Pun (optional):", key="clearance_substring_term"
     ).upper()
 
-  if st.button("Run Full Clearance Search", type="primary"):
+  if st.button(
+      "Run Full Clearance Search", type="primary", key="btn_run_clearance"
+  ):
     if not raw_mark.strip():
       st.error("Please enter a trademark name.")
       return
@@ -98,25 +100,27 @@ def run():
         if raw_mark != squished_mark
         else uspto_spaced
     )
-    ttb_marks_list = ["%" + "%".join(words) + "%"]
+
+    # Use clean, targeted terms for TTB to avoid hitting TTB's 500-record cap error page
+    clean_ttb_terms = list(set([raw_mark.strip(), squished_mark.strip()]))
 
     secondary_terms = []
     if dominant_term:
       web_mark_base += f' OR "{dominant_term}"'
       secondary_terms.append(f"(CM2:*{dominant_term}*)")
-      ttb_marks_list.append(f"%{dominant_term}%")
+      clean_ttb_terms.append(dominant_term)
     if phonetic_term:
       web_mark_base += f' OR "{phonetic_term}"'
       secondary_terms.append(f"(CM2:*{phonetic_term}*)")
-      ttb_marks_list.append(f"%{phonetic_term}%")
+      clean_ttb_terms.append(phonetic_term)
     if conceptual_term:
       web_mark_base += f' OR "{conceptual_term}"'
       secondary_terms.append(f"(CM2:*{conceptual_term}*)")
-      ttb_marks_list.append(f"%{conceptual_term}%")
+      clean_ttb_terms.append(conceptual_term)
     if substring_term:
       web_mark_base += f' OR "{substring_term}"'
       secondary_terms.append(f"(CM2:*{substring_term}*)")
-      ttb_marks_list.append(f"%{substring_term}%")
+      clean_ttb_terms.append(substring_term)
 
     class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
     date_filter = ""
@@ -140,82 +144,93 @@ def run():
     ):
       try:
         with sync_playwright() as p:
-          cloud_args = [
-              "--no-sandbox",
-              "--disable-setuid-sandbox",
-              "--disable-dev-shm-usage",
-              "--disable-gpu",
-              "--single-process",
-              "--no-zygote",
-              "--disable-blink-features=AutomationControlled",
-          ]
-
-          # --- 1. Run USPTO Search ---
+          # Single Chromium browser instance to prevent memory leaks on Streamlit Cloud
           browser = p.chromium.launch(
               headless=True,
               args=[
                   "--no-sandbox",
+                  "--disable-setuid-sandbox",
                   "--disable-dev-shm-usage",
                   "--disable-gpu",
                   "--single-process",
                   '--js-flags="--max-old-space-size=256"',
               ],
           )
-          context = browser.new_context(
-              user_agent=(
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                  " AppleWebKit/537.36"
-              ),
-              accept_downloads=True,
-              permissions=[],
-          )
-          page = context.new_page()
-          uspto_data = scrape_uspto(
-              page, primary_uspto_query, excel_filename, secondary_uspto_query
-          )
-          context.close()
-          browser.close()
-          gc.collect()
 
-          # --- 2. Run TTB Search (IN CHUNKS WITH FRESH BROWSERS) ---
-          ttb_chunks = [
-              ("01/01/1985", "12/31/1999"),
-              ("01/01/2000", "12/31/2014"),
-              ("01/01/2015", today.strftime("%m/%d/%Y")),
-          ]
-
-          raw_ttb_data = []
-          for start_date, end_date in ttb_chunks:
-            browser = p.chromium.launch(headless=True, args=cloud_args)
-            context = browser.new_context(
+          # --- 1. USPTO Search ---
+          uspto_data = []
+          try:
+            context1 = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                     " AppleWebKit/537.36"
                 ),
                 accept_downloads=True,
             )
-            chunk_page = context.new_page()
-
-            chunk_results = scrape_ttb(
-                chunk_page, start_date, end_date, list(set(ttb_marks_list))
+            page1 = context1.new_page()
+            page1.set_default_timeout(30000)
+            uspto_data = scrape_uspto(
+                page1,
+                primary_uspto_query,
+                excel_filename,
+                secondary_uspto_query,
             )
-            if chunk_results:
-              raw_ttb_data.extend(chunk_results)
+            context1.close()
+          except Exception as e:
+            st.warning(f"USPTO scraping warning: {e}")
 
-            chunk_page.close()
-            context.close()
-            browser.close()
-            gc.collect()
+          # --- 2. TTB COLA Search ---
+          ttb_chunks = [
+              ("01/01/1995", "12/31/2009"),
+              ("01/01/2010", "12/31/2019"),
+              ("01/01/2020", today.strftime("%m/%d/%Y")),
+          ]
+          raw_ttb_data = []
 
-          unique_ttb = {item["ttb_id"]: item for item in raw_ttb_data}
+          context2 = browser.new_context(
+              user_agent=(
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                  " AppleWebKit/537.36"
+              ),
+              accept_downloads=True,
+          )
+
+          for start_date, end_date in ttb_chunks:
+            try:
+              chunk_page = context2.new_page()
+              chunk_page.set_default_timeout(25000)
+
+              chunk_results = scrape_ttb(
+                  chunk_page, start_date, end_date, clean_ttb_terms
+              )
+              if chunk_results:
+                raw_ttb_data.extend(chunk_results)
+
+              chunk_page.close()
+            except Exception as e:
+              st.warning(
+                  f"TTB chunk ({start_date} to {end_date}) warning: {e}"
+              )
+
+          context2.close()
+          browser.close()
+          gc.collect()
+
+          unique_ttb = {
+              item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
+          }
           ttb_data = list(unique_ttb.values())
 
-        # --- 3. Run Google Search ---
-        google_date_from = "1900-01-01"
-        google_date_to = today.strftime("%Y-%m-%d")
-        google_data = scrape_google(
-            web_mark_base, raw_mark, google_date_from, google_date_to
-        )
+        # --- 3. Google Search ---
+        google_data = []
+        try:
+          google_date_from = "1900-01-01"
+          google_date_to = today.strftime("%Y-%m-%d")
+          google_data = scrape_google(
+              web_mark_base, raw_mark, google_date_from, google_date_to
+          )
+        except Exception as e:
+          st.warning(f"Google web search warning: {e}")
 
         # --- Report Generation ---
         base_filename = f"Clearance_Report_{safe_mark}"
@@ -278,6 +293,7 @@ def run():
           file_name=f"{c_data['base_filename']}.pdf",
           mime="application/pdf",
           width="stretch",
+          key="download_clearance_pdf",
       )
     with col_d2:
       st.download_button(
@@ -288,6 +304,7 @@ def run():
               "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
           ),
           width="stretch",
+          key="download_clearance_docx",
       )
     with col_d3:
       if st.button(
