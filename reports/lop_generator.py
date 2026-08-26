@@ -93,68 +93,63 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
+                # THE BULLETPROOF WAIT: Do not proceed until the specific Serial Number appears on screen!
                 try:
-                    page.wait_for_selector("div.value, td.value, td, th", state="attached", timeout=15000)
+                    page.wait_for_selector(f"text='{serial_number}'", state="visible", timeout=15000)
                 except:
                     try:
+                        # Fallback for search box entry
                         page.locator('#searchNumber').fill(serial_number)
                         page.locator('#searchNumber').press("Enter")
-                        page.wait_for_selector("div.value, td.value, td, th", state="attached", timeout=15000)
+                        page.wait_for_selector(f"text='{serial_number}'", state="visible", timeout=15000)
                     except:
                         pass 
                     
-                page.wait_for_timeout(2000) 
-
-                # SAFE EXPAND: Soft click to reveal hidden goods in the new TSDR layout.
-                try:
-                    expand_btn = page.locator("text='Expand All'").first
-                    if expand_btn.is_visible(timeout=2000):
-                        expand_btn.click(force=True)
-                        page.wait_for_timeout(1000)
-                except:
-                    pass
+                # Give it one extra second just to let the DOM fully settle
+                page.wait_for_timeout(1000) 
                 
                 if "Access Denied" in page.content():
                     browser.close()
                     raise Exception("USPTO Firewall Blocked the Connection.")
 
-                # DUAL-LAYOUT EXTRACTION: Safely parses both old DIVs and new TABLEs
+                # The original, clean, safe extraction logic
                 js_extract = """
                 () => {
                     let markName = "Unknown Mark";
                     let goodsArray = [];
                     
-                    // Grab all possible label containers (divs for old layout, th/td for new layout)
-                    let labels = document.querySelectorAll('div.key, th, td');
-                    
-                    for (let el of labels) {
-                        let text = el.textContent.trim();
-                        
-                        // 1. Get the Mark Name
-                        if (text === 'Mark:' || text === 'Word Mark:') {
-                            let nextEl = el.nextElementSibling;
-                            if (nextEl) {
-                                let val = nextEl.textContent.trim();
-                                // Ensure it didn't grab the top search bar UI by accident
-                                if (val && !val.includes("Ser No")) {
-                                    markName = val;
-                                }
-                            }
-                        }
-                        
-                        // 2. Get the Goods
-                        if (text === 'For:') {
-                            let nextEl = el.nextElementSibling;
-                            if (nextEl) {
-                                let val = nextEl.textContent.trim().replace(/\\s+/g, ' ');
-                                if (val) {
-                                    goodsArray.push(val);
+                    let keys = document.querySelectorAll('.key');
+                    for (let k of keys) {
+                        let text = k.textContent.trim().replace(/:/g, '');
+                        if (text === 'Mark' || text === 'Word Mark' || text === 'Literal Element') {
+                            let val = k.nextElementSibling;
+                            if (val) {
+                                let cleanVal = val.textContent.trim();
+                                // Ignore the top search dropdown menu
+                                if (cleanVal && !cleanVal.includes("Ser No")) {
+                                    markName = cleanVal;
+                                    break;
                                 }
                             }
                         }
                     }
                     
-                    // Deduplicate in case the new layout lists the goods twice
+                    let rows = document.querySelectorAll('.row');
+                    for (let row of rows) {
+                        let keyNode = row.querySelector('.key');
+                        let valNode = row.querySelector('.value');
+                        if (keyNode && valNode) {
+                            let text = keyNode.textContent.trim().replace(/:/g, '');
+                            if (text === 'For') {
+                                let cleanGoods = valNode.textContent.replace(/\\s+/g, ' ').trim();
+                                if (cleanGoods) {
+                                    goodsArray.push(cleanGoods);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Deduplicate identical goods clauses
                     goodsArray = [...new Set(goodsArray)];
                     
                     return { 
