@@ -4,8 +4,9 @@ import re
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# --- KEEP YOUR EXISTING IMPORTS AT THE TOP ---
-# (e.g., from utils import run_uspto_bridging_search)
+# --- KEEP YOUR EXISTING IMPORTS HERE ---
+# Make sure your bridging search function is imported. For example:
+# from utils import run_uspto_bridging_search 
 
 # ==========================================
 # 1. TSDR SCRAPER FUNCTION (With 3x Retry Loop)
@@ -15,6 +16,7 @@ def fetch_tsdr_data(serial_number, target_classes):
     if not serial_number: return None, None
         
     max_retries = 3
+    
     for attempt in range(max_retries):
         try:
             with sync_playwright() as p:
@@ -38,13 +40,14 @@ def fetch_tsdr_data(serial_number, target_classes):
                 url = f"https://tsdr.uspto.gov/#caseNumber={serial_number}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
                 page.goto(url, timeout=30000)
                 
+                # BULLETPROOF WAIT: Wait for the actual data value boxes to physically attach to the DOM
                 try:
-                    page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                    page.wait_for_selector("div.value", state="attached", timeout=15000)
                 except:
                     try:
                         page.locator('#searchNumber').fill(serial_number)
                         page.locator('#searchNumber').press("Enter")
-                        page.wait_for_function("() => document.body.innerText.includes('Mark:')", timeout=15000)
+                        page.wait_for_selector("div.value", state="attached", timeout=15000)
                     except:
                         pass 
                     
@@ -98,6 +101,11 @@ def fetch_tsdr_data(serial_number, target_classes):
                 goods_text = result.get('goods', 'Goods boundaries not found. Please manually copy from TSDR.')
                 
                 browser.close()
+                
+                # SAFEGUARD: If it somehow still pulled blank data, throw an error to force a retry!
+                if mark_name == "Unknown Mark":
+                    raise Exception("Page loaded but data was missing. Retrying...")
+                    
                 return mark_name, goods_text
                 
         except Exception as e:
@@ -172,7 +180,7 @@ def run():
             # The Exact Search Query with the Live Document parameter
             search_query = f'GS:"{t_kw}" AND GS:"{c_kw}" AND IC:{c_class} AND IC:{t_class} AND LD:true'
             
-            # NOTE: Make sure run_uspto_bridging_search is imported at the top!
+            # Execute search
             results_df = run_uspto_bridging_search(search_query, max_results=20)
             
             if results_df.empty:
