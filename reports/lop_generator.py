@@ -2,7 +2,14 @@ import streamlit as st
 import re
 import os
 import pandas as pd
+from io import BytesIO
 from playwright.sync_api import sync_playwright
+
+# Import ReportLab for PDF generation
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # Import your actual USPTO scraper for Step 2
 from scrapers.uspto_scraper import scrape_uspto
@@ -122,7 +129,6 @@ def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
     goods_col = next((c for c in cols if 'good' in str(c).lower() or 'service' in str(c).lower()), None)
     status_col = next((c for c in cols if 'status' in str(c).lower()), None)
     
-    # STRICT FILTER: Only keep Registered Marks
     if rn_col:
         raw_df = raw_df[raw_df[rn_col].notna()]
         raw_df = raw_df[raw_df[rn_col].astype(str).str.strip() != '']
@@ -150,6 +156,64 @@ def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
     return ui_df
 
 # ==========================================
+# 3. HELPER: GENERATE EXHIBIT A PDF
+# ==========================================
+def generate_exhibit_a_pdf(selected_df):
+    """Generates a USPTO-compliant Exhibit A PDF table of selected evidence registrations."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36
+    )
+    elements = []
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'ExhibitTitle',
+        parent=styles['Heading1'],
+        fontSize=14,
+        leading=18,
+        alignment=1,
+        textColor=colors.HexColor("#1E3A8A")
+    )
+    elements.append(Paragraph("<b>EXHIBIT A: BRIDGING REGISTRATIONS EVIDENCE</b>", title_style))
+    elements.append(Spacer(1, 14))
+
+    table_data = [["Mark", "Reg. No.", "Serial No.", "Filtered Relevant Goods & Services"]]
+    
+    cell_style = ParagraphStyle('CellText', parent=styles['Normal'], fontSize=9, leading=12)
+    header_style = ParagraphStyle('HeaderText', parent=styles['Normal'], fontSize=9, leading=11, textColor=colors.white)
+
+    for _, row in selected_df.iterrows():
+        mark_p = Paragraph(f"<b>{row.get('Mark', '')}</b>", cell_style)
+        reg_p = Paragraph(str(row.get('Reg Number', '')), cell_style)
+        sn_p = Paragraph(str(row.get('Serial', '')), cell_style)
+        goods_p = Paragraph(str(row.get('Filtered Goods', '')), cell_style)
+        table_data.append([mark_p, reg_p, sn_p, goods_p])
+
+    headers = [Paragraph(f"<b>{h}</b>", header_style) for h in table_data[0]]
+    table_data[0] = headers
+
+    t = Table(table_data, colWidths=[110, 75, 75, 280])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1E3A8A")),
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+    ]))
+    
+    elements.append(t)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+# ==========================================
 # PAGE UI & LAYOUT (WRAPPED IN RUN FUNCTION)
 # ==========================================
 def run():
@@ -171,7 +235,6 @@ def run():
 
     st.info("Check the boxes next to the specific keywords you want to cross-reference in the bridging search.")
 
-    # Generate checklist DataFrames directly from the pasted raw text
     c_df = parse_goods_to_df(client_raw)
     a_df = parse_goods_to_df(app_raw)
 
@@ -278,7 +341,6 @@ def run():
         df = st.session_state.get('bridging_results', pd.DataFrame())
         results_count = len(df)
         
-        # --- EXPANSION PROMPT IF LESS THAN 10 RESULTS ---
         if results_count < 10:
             st.warning(f"⚠️ **Found {results_count} bridging registration(s).** A strong Letter of Protest ideally includes 5–10 solid evidence marks.")
             
@@ -358,7 +420,6 @@ def run():
                             st.success(f"Updated results! Total registrations found: {len(st.session_state['bridging_results'])}")
                             st.rerun()
 
-        # --- STEP 3 DISPLAY TABLE ---
         if not df.empty:
             st.write("Select the best records below to include in your Exhibit A.")
             
@@ -374,3 +435,36 @@ def run():
                     "Filtered Goods": st.column_config.TextColumn("Filtered Goods", width="large")
                 }
             )
+
+            # --- STEP 4: GENERATE EXHIBIT A ---
+            selected_rows = edited_df[edited_df['Select'] == True]
+            
+            st.divider()
+            st.markdown("### Step 4: Export Exhibit A")
+            
+            if selected_rows.empty:
+                st.info("💡 Check the boxes next to the marks in Step 3 above to enable PDF export.")
+            else:
+                st.success(f" Ready! **{len(selected_rows)}** registration(s) selected for Exhibit A.")
+                
+                pdf_buffer = generate_exhibit_a_pdf(selected_rows)
+                
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    st.download_button(
+                        label="📄 Download Exhibit A PDF",
+                        data=pdf_buffer,
+                        file_name="Exhibit_A_Bridging_Registrations.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True
+                    )
+                with btn_col2:
+                    csv_data = selected_rows.drop(columns=['Select']).to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📊 Download Raw Data (CSV)",
+                        data=csv_data,
+                        file_name="Exhibit_A_Evidence.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
