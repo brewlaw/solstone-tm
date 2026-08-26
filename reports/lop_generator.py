@@ -31,7 +31,10 @@ DEFAULT_RELATED_TERMS = {
 def parse_goods_to_df(raw_goods):
     """Splits raw goods text by semicolons/newlines into a DataFrame for the checklist UI."""
     if not raw_goods or not raw_goods.strip():
-        return pd.DataFrame({"Select": [], "Keyword": []})
+        return pd.DataFrame({
+            "Select": pd.Series([], dtype=bool),
+            "Keyword": pd.Series([], dtype=str)
+        })
     
     raw_items = re.split(r'[;\n]', raw_goods)
     cleaned_items = [item.strip() for item in raw_items if item.strip()]
@@ -40,9 +43,15 @@ def parse_goods_to_df(raw_goods):
     unique_items = [x for x in cleaned_items if not (x in seen or seen.add(x))]
     
     if not unique_items:
-        return pd.DataFrame({"Select": [], "Keyword": []})
+        return pd.DataFrame({
+            "Select": pd.Series([], dtype=bool),
+            "Keyword": pd.Series([], dtype=str)
+        })
         
-    return pd.DataFrame({"Select": [False] * len(unique_items), "Keyword": unique_items})
+    return pd.DataFrame({
+        "Select": pd.Series([False] * len(unique_items), dtype=bool),
+        "Keyword": pd.Series(unique_items, dtype=str)
+    })
 
 # ==========================================
 # 2. HELPER: CLEAN & SCORE RESULTS
