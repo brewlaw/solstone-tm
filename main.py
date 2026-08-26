@@ -2,7 +2,7 @@ import os
 os.system("playwright install chromium")
 
 import streamlit as st
-from reports import status_report, clearance_tool, monitoring_tool, section_2e_tool, lop_generator
+from reports import status_report, clearance_tool, monitoring_tool, section_2e_tool, lop_generator, test
 from utils.saved_searches import get_saved_searches, delete_saved_search
 
 st.set_page_config(page_title="Solstone IP Suite", layout="wide", page_icon="⚖️")
