@@ -58,7 +58,7 @@ def fetch_tsdr_data(serial_number, target_classes):
                 page.goto("https://tmsearch.uspto.gov/search/search-information", timeout=45000, wait_until="domcontentloaded")
                 time.sleep(2)
 
-                # 2. Locate the search box
+                # 2. Locate the search box exactly like uspto_scraper.py
                 search_input = page.locator('input[aria-label="Search field"], textarea[aria-label="Search field"], input[placeholder*="Search"]').first
                 
                 try:
@@ -71,72 +71,64 @@ def fetch_tsdr_data(serial_number, target_classes):
                     search_input = page.get_by_placeholder("Search using field tags").first
                     search_input.wait_for(state="visible", timeout=10000)
 
-                # 3. Format the SN or RN query
+                # 3. Format the SN or RN query and search
                 num_str = str(serial_number).strip()
                 query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
                 
-                # 4. Fill and hit Enter!
                 search_input.fill(query)
                 page.keyboard.press("Enter")
                 
-                # 5. Wait for the goods container to load on the single-result page
-                page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
+                # 4. Wait for the goods container to appear. 
+                # (When searching a single SN, TMSearch auto-loads the detailed result page!)
+                goods_container = page.locator("#tm-detail_goods-and-services-goods-and-services")
+                try:
+                    goods_container.wait_for(state="visible", timeout=15000)
+                except:
+                    # Fallback just in case it loads a list view instead
+                    first_link = page.locator("a[href*='/search-results/']").first
+                    if first_link.is_visible():
+                        first_link.click(force=True)
+                        goods_container.wait_for(state="visible", timeout=10000)
+                    else:
+                        raise Exception("Could not find the goods container on the page.")
+
+                # 5. Extract Mark Name
+                mark_name = page.evaluate("""() => {
+                    let elements = Array.from(document.querySelectorAll('p, div, span, label, th, td'));
+                    let wm = elements.find(el => el.textContent.trim() === 'Wordmark' || el.textContent.trim() === 'Mark');
+                    return (wm && wm.nextElementSibling) ? wm.nextElementSibling.textContent.trim() : 'Unknown Mark';
+                }""")
                 
-                # 6. Extract directly from the page DOM and clean out prefixes/dates
-                js_extract = """
-                () => {
-                    let markName = "Unknown Mark";
-                    let goodsArray = [];
-                    
-                    // Grab Mark Name
-                    let elements = Array.from(document.querySelectorAll('*'));
-                    let wmLabel = elements.find(el => el.textContent.trim() === 'Wordmark');
-                    if (wmLabel && wmLabel.nextElementSibling) {
-                        markName = wmLabel.nextElementSibling.textContent.trim();
-                    }
-                    
-                    // Grab Goods and strip Class numbers & dates
-                    let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
-                    if (goodsBox) {
-                        let pTags = goodsBox.querySelectorAll('p');
-                        if (pTags.length > 0) {
-                            pTags.forEach(p => {
-                                let text = p.textContent.trim().replace(/\\s+/g, ' ');
-                                // Remove 'IC 032:'
-                                text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
-                                // Remove ' | First Use...'
-                                text = text.split('|')[0].trim();
-                                if (text) goodsArray.push(text);
-                            });
-                        } else {
-                            let text = goodsBox.textContent.trim().replace(/\\s+/g, ' ');
-                            text = text.replace(/^IC\\s*\\d{1,3}\\s*[:.]\\s*/i, '');
-                            text = text.split('|')[0].trim();
-                            if (text) goodsArray.push(text);
-                        }
-                    }
-                    
-                    return { 
-                        mark: markName, 
-                        goods: goodsArray.length > 0 ? goodsArray.join("; ") : "Goods boundaries not found." 
-                    };
-                }
-                """
+                if mark_name == "Unknown Mark" or not mark_name:
+                    mark_name = "[Design Mark / Unlabeled]"
+
+                # 6. Extract Goods text directly via Python Playwright
+                raw_goods_text = goods_container.inner_text()
                 
-                result = page.evaluate(js_extract)
                 browser.close()
                 
-                if result['mark'] == "Unknown Mark" and "Goods boundaries not found" in result['goods']:
-                    raise Exception("Failed to extract data from TMSearch.")
-                    
-                return result['mark'], result['goods']
+                # 7. Clean up the extracted goods text (Strip "IC 032:" and "| First Use...")
+                cleaned_clauses = []
+                for line in raw_goods_text.split('\n'):
+                    line = line.strip()
+                    if line:
+                        # Remove the 'IC 032:' prefix
+                        line = re.sub(r'(?i)^IC\s*\d{1,3}\s*[:.]\s*', '', line)
+                        # Remove everything after the pipe character (dates)
+                        line = line.split('|')[0].strip()
+                        if line:
+                            cleaned_clauses.append(line)
+                            
+                final_goods = "; ".join(cleaned_clauses) if cleaned_clauses else "Goods boundaries not found."
+                
+                return mark_name, final_goods
                 
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2)
                 continue
             else:
-                return "Error", f"Failed to fetch data after 3 attempts: {str(e)}"
+                return "Error", f"TMSearch fetch failed: {str(e)}"
 
 
 # ==========================================
