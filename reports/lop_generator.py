@@ -69,6 +69,19 @@ DEFAULT_RELATED_TERMS = {
 
 
 # ==========================================
+# 0. HELPER: OWNER NAME NORMALIZATION
+# ==========================================
+def normalize_owner_name(owner_str):
+  """Strips entity types, parentheses, addresses, and punctuation to create a pure canonical key for owner deduplication."""
+  if not isinstance(owner_str, str) or not owner_str.strip():
+    return ""
+  # Cut off at first parenthesis or semicolon (where entity details or addresses begin)
+  base_name = re.split(r"[\(;]", owner_str)[0]
+  # Strip all non-alphanumeric characters and convert to uppercase
+  return re.sub(r"[^A-Z0-9]", "", base_name.upper())
+
+
+# ==========================================
 # 1. HELPER: PARSE GOODS INTO CHECKLIST
 # ==========================================
 def parse_goods_to_df(raw_goods):
@@ -245,11 +258,11 @@ def process_uspto_excel_results(excel_out, c_class, t_class, c_clean, t_clean):
 
   ui_df = ui_df[ui_df["Filtered Goods"] != ""]
 
-  # STRICT OWNER DEDUPLICATION: Ensures no owner appears on multiple lines
-  ui_df["Owner_Clean"] = ui_df["Owner"].astype(str).str.upper().str.strip()
+  # STRICT OWNER DEDUPLICATION USING NORMALIZED KEY
+  ui_df["Owner_Key"] = ui_df["Owner"].apply(normalize_owner_name)
   ui_df = (
-      ui_df.drop_duplicates(subset=["Owner_Clean"], keep="first")
-      .drop(columns=["Owner_Clean"])
+      ui_df.drop_duplicates(subset=["Owner_Key"], keep="first")
+      .drop(columns=["Owner_Key"])
       .reset_index(drop=True)
   )
 
@@ -399,7 +412,6 @@ def download_official_tsdr_pdfs_batch(selected_df):
         )
         page.goto(url, timeout=30000)
 
-        # Wait for TSDR page to fully render
         page.wait_for_function(
             "() => document.body.innerText.includes('Mark:') ||"
             " document.body.innerText.includes('US Serial Number:')",
@@ -407,7 +419,6 @@ def download_official_tsdr_pdfs_batch(selected_df):
         )
         page.wait_for_timeout(1000)
 
-        # 1. Click main 'Download' dropdown toggle button
         download_menu = page.locator("a, button, div").filter(
             has_text=re.compile(r"^Download$", re.IGNORECASE)
         ).first
@@ -417,7 +428,6 @@ def download_official_tsdr_pdfs_batch(selected_df):
         download_menu.click()
         page.wait_for_timeout(500)
 
-        # 2. Click inner blue 'Download' button inside popup and catch the file download
         with page.expect_download(timeout=15000) as download_info:
           action_btn = page.locator("a, button, input").filter(
               has_text=re.compile(r"Download", re.IGNORECASE)
@@ -432,7 +442,6 @@ def download_official_tsdr_pdfs_batch(selected_df):
         if pdf_bytes and len(pdf_bytes) > 1000:
           pdf_dict[num_to_use] = pdf_bytes
       except Exception:
-        # Direct session endpoint fallback
         try:
           id_type = (
               "rn"
@@ -627,6 +636,13 @@ def run():
 
     df = st.session_state.get("bridging_results", pd.DataFrame())
     if not df.empty:
+      # ALWAYS DEDUPLICATE BY NORMALIZED OWNER IN STEP 3 VIEW
+      df["Owner_Key"] = df["Owner"].apply(normalize_owner_name)
+      df = (
+          df.drop_duplicates(subset=["Owner_Key"], keep="first")
+          .drop(columns=["Owner_Key"])
+          .reset_index(drop=True)
+      )
       if "Select" not in df.columns:
         df.insert(0, "Select", False)
       df["Select"] = df["Select"].fillna(False).astype(bool)
@@ -764,15 +780,15 @@ def run():
                     subset=["Reg Number"], keep="first"
                 )
 
-                # DEDUPLICATE BY OWNER IN EXPANDED RESULTS
-                combined["Owner_Clean"] = (
-                    combined["Owner"].astype(str).str.upper().str.strip()
+                # DEDUPLICATE COMBINED RESULTS BY NORMALIZED OWNER KEY
+                combined["Owner_Key"] = combined["Owner"].apply(
+                    normalize_owner_name
                 )
                 combined = (
                     combined.drop_duplicates(
-                        subset=["Owner_Clean"], keep="first"
+                        subset=["Owner_Key"], keep="first"
                     )
-                    .drop(columns=["Owner_Clean"])
+                    .drop(columns=["Owner_Key"])
                     .reset_index(drop=True)
                 )
 
@@ -786,14 +802,14 @@ def run():
                 exp_df_sorted = exp_df_clean.sort_values(
                     by="MatchScore", ascending=False
                 )
-                exp_df_sorted["Owner_Clean"] = (
-                    exp_df_sorted["Owner"].astype(str).str.upper().str.strip()
+                exp_df_sorted["Owner_Key"] = exp_df_sorted["Owner"].apply(
+                    normalize_owner_name
                 )
                 exp_df_sorted = (
                     exp_df_sorted.drop_duplicates(
-                        subset=["Owner_Clean"], keep="first"
+                        subset=["Owner_Key"], keep="first"
                     )
-                    .drop(columns=["Owner_Clean"])
+                    .drop(columns=["Owner_Key"])
                     .reset_index(drop=True)
                 )
 
@@ -852,13 +868,10 @@ def run():
               f"Navigating TSDR and downloading official status PDFs for"
               f" {len(selected_rows)} mark(s)..."
           ):
-            # 1. Download official status PDFs directly from TSDR using Playwright
             pdf_dict = download_official_tsdr_pdfs_batch(selected_rows)
 
-            # 2. Build Cover Page + Master Index
             cover_buffer = generate_exhibit_cover_pdf(selected_rows)
 
-            # 3. Stitch Cover Page and official TSDR PDFs together
             writer = PdfWriter()
             cover_reader = PdfReader(cover_buffer)
             for page in cover_reader.pages:
