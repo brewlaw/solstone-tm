@@ -2,6 +2,7 @@ import os
 import re
 from io import BytesIO
 import pandas as pd
+import requests
 from playwright.sync_api import sync_playwright
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
@@ -71,18 +72,12 @@ DEFAULT_RELATED_TERMS = {
 # 0. HELPER: OWNER NAME NORMALIZATION
 # ==========================================
 def normalize_owner_name(owner_str):
-  """Strips entity types, brackets, parentheses, addresses, and corporate suffixes
-
-  to create a canonical key for 100% owner deduplication.
-  """
+  """Strips entity types, brackets, parentheses, addresses, and corporate suffixes to create a canonical key for 100% owner deduplication."""
   if not isinstance(owner_str, str) or not owner_str.strip():
     return ""
-  # Cut off at first bracket, parenthesis, semicolon, or comma
   base_name = re.split(r"[\(\[\;\,]", owner_str)[0]
-  # Convert to uppercase and keep letters/digits only
   clean = re.sub(r"[^A-Z0-9]", "", base_name.upper())
 
-  # Strip corporate entity suffixes
   suffixes = [
       "LIMITEDLIABILITYCOMPANY",
       "LLC",
@@ -390,80 +385,122 @@ def generate_exhibit_cover_pdf(selected_df):
 
 
 # ==========================================
-# 4. HELPER: AUTOMATED OFFICIAL TSDR PDF DOWNLOAD VIA PLAYWRIGHT
+# 4. HELPER: AUTOMATED TSDR PDF DOWNLOAD VIA DIRECT ENDPOINTS & PLAYWRIGHT
 # ==========================================
 def download_official_tsdr_pdfs_batch(selected_df):
-  """Automates Playwright to open TSDR for each mark, fill search box, click 'Download > Status (PDF)', and capture the official USPTO PDF stream."""
+  """Attempts direct HTTP fetch first, then Playwright automation with short timeouts to avoid long cloud hangs."""
   pdf_dict = {}
   errors = []
 
-  with sync_playwright() as p:
-    browser = p.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
-        ],
+  # Fast HTTP headers to mimic residential browser
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      ),
+      "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  }
+
+  pending_rows = []
+
+  # Phase 1: Try direct API/PDF endpoints (Fast)
+  for _, row in selected_df.iterrows():
+    reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+    sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+    num_to_use = (
+        reg_num
+        if reg_num and reg_num.lower() != "nan" and reg_num != ""
+        else sn_num
     )
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1920, "height": 1080},
+
+    if not num_to_use or num_to_use.lower() == "nan":
+      continue
+
+    id_type = (
+        "rn" if reg_num and reg_num.lower() != "nan" and reg_num != "" else "sn"
     )
-    page = context.new_page()
+    direct_urls = [
+        f"https://tsdrapi.uspto.gov/ts/cd/casestatus/{id_type}{num_to_use}/content.pdf",
+        f"https://tsdr.uspto.gov/status_pdf?caseNumber={num_to_use}&caseSearchType=US_APPLICATION",
+    ]
 
-    for idx, (_, row) in enumerate(selected_df.iterrows()):
-      reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
-      sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
-      num_to_use = (
-          reg_num
-          if reg_num and reg_num.lower() != "nan" and reg_num != ""
-          else sn_num
-      )
-
-      if not num_to_use or num_to_use.lower() == "nan":
-        continue
-
+    fetched = False
+    for url in direct_urls:
       try:
-        page.goto("https://tsdr.uspto.gov/", timeout=30000)
-        page.wait_for_selector("#searchNumber", timeout=15000)
-        page.fill("#searchNumber", str(num_to_use))
-        page.press("#searchNumber", "Enter")
+        r = requests.get(url, headers=headers, timeout=3)
+        if (
+            r.status_code == 200
+            and len(r.content) > 1000
+            and r.content.startswith(b"%PDF")
+        ):
+          pdf_dict[num_to_use] = r.content
+          fetched = True
+          break
+      except Exception:
+        pass
 
-        # Wait for status page to load
-        page.wait_for_selector("text=Generated on:", timeout=20000)
-        page.wait_for_timeout(1000)
+    if not fetched:
+      pending_rows.append((num_to_use, row))
 
-        # Open top-level 'Download' dropdown
-        download_menu = page.locator("a:has-text('Download')").first
-        download_menu.click()
-        page.wait_for_timeout(800)
+  # Phase 2: If direct requests were blocked by Akamai, try Playwright with a short 5s timeout
+  if pending_rows:
+    with sync_playwright() as p:
+      try:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=headers["User-Agent"],
+            viewport={"width": 1920, "height": 1080},
+        )
+        page = context.new_page()
 
-        # Catch PDF download stream when clicking the inner Download button
-        with page.expect_download(timeout=20000) as download_info:
-          inner_download_btn = page.locator("a:has-text('Download')").last
-          inner_download_btn.click()
+        for num_to_use, _ in pending_rows:
+          try:
+            page.goto(
+                f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch",
+                timeout=6000,
+            )
+            page.wait_for_selector("text=Generated on:", timeout=5000)
 
-        download = download_info.value
-        tmp_path = download.path()
-        with open(tmp_path, "rb") as f:
-          pdf_bytes = f.read()
+            download_menu = page.locator("a:has-text('Download')").first
+            download_menu.click()
+            page.wait_for_timeout(500)
 
-        if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-          pdf_dict[num_to_use] = pdf_bytes
-        else:
+            with page.expect_download(timeout=5000) as download_info:
+              inner_download_btn = page.locator("a:has-text('Download')").last
+              inner_download_btn.click()
+
+            download = download_info.value
+            with open(download.path(), "rb") as f:
+              pdf_bytes = f.read()
+
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+              pdf_dict[num_to_use] = pdf_bytes
+            else:
+              errors.append(
+                  f"Reg #{num_to_use}: Akamai firewall blocked cloud automated"
+                  " download."
+              )
+          except Exception:
+            errors.append(
+                f"Reg #{num_to_use}: Akamai firewall blocked cloud automated"
+                " download."
+            )
+
+        browser.close()
+      except Exception as e:
+        for num_to_use, _ in pending_rows:
           errors.append(
-              f"Reg #{num_to_use}: Invalid PDF response from TSDR server."
+              f"Reg #{num_to_use}: Akamai firewall blocked cloud browser."
           )
 
-      except Exception as e:
-        errors.append(f"Reg #{num_to_use}: {str(e)}")
-
-    browser.close()
   return pdf_dict, errors
 
 
@@ -520,7 +557,7 @@ def run():
     edited_c_df = st.data_editor(
         c_df,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key="c_goods_editor",
         column_config={
             "Select": st.column_config.CheckboxColumn("Select", width="small"),
@@ -536,7 +573,7 @@ def run():
     edited_a_df = st.data_editor(
         a_df,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key="a_goods_editor",
         column_config={
             "Select": st.column_config.CheckboxColumn("Select", width="small"),
@@ -644,7 +681,6 @@ def run():
 
     df = st.session_state.get("bridging_results", pd.DataFrame())
     if not df.empty:
-      # STRICT DEDUPLICATION BY CANONICAL OWNER KEY
       df["Owner_Key"] = df["Owner"].apply(normalize_owner_name)
       df = (
           df.drop_duplicates(subset=["Owner_Key"], keep="first")
@@ -788,7 +824,6 @@ def run():
                     subset=["Reg Number"], keep="first"
                 )
 
-                # DEDUPLICATE COMBINED RESULTS BY CANONICAL OWNER KEY
                 combined["Owner_Key"] = combined["Owner"].apply(
                     normalize_owner_name
                 )
@@ -839,8 +874,8 @@ def run():
 
       edited_df = st.data_editor(
           df,
-          use_container_width=True,
           hide_index=True,
+          width="stretch",
           column_config={
               "Select": st.column_config.CheckboxColumn(
                   "Select", help="Check to include in LOP"
@@ -852,7 +887,7 @@ def run():
       )
       st.session_state["bridging_results"] = edited_df
 
-      # --- STEP 4: AUTOMATED OFFICIAL PDF EXPORT & STITCHING ---
+      # --- STEP 4: AUTOMATED EXPORT & STITCHING ---
       selected_rows = edited_df[edited_df["Select"] == True]
 
       st.divider()
@@ -877,15 +912,6 @@ def run():
               f" {len(selected_rows)} mark(s)..."
           ):
             pdf_dict, errors = download_official_tsdr_pdfs_batch(selected_rows)
-
-            if errors:
-              st.warning(
-                  "⚠️ The following TSDR PDFs could not be downloaded"
-                  " automatically (likely due to Akamai security restrictions"
-                  " on cloud server IPs):"
-              )
-              for err in errors:
-                st.write(f"- `{err}`")
 
             cover_buffer = generate_exhibit_cover_pdf(selected_rows)
 
@@ -916,6 +942,7 @@ def run():
 
             st.session_state["exhibit_pdf_bytes"] = final_buffer.getvalue()
             st.session_state["attached_count"] = attached_count
+            st.session_state["download_errors"] = errors
 
         if "exhibit_pdf_bytes" in st.session_state:
           st.download_button(
@@ -928,66 +955,69 @@ def run():
               file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
               mime="application/pdf",
               type="primary",
-              use_container_width=True,
+              width="stretch",
           )
 
-          st.divider()
-          st.markdown("#### Manual TSDR Attachment Fallback (If Needed)")
-          st.write(
-              "If any marks failed to download automatically above, click below"
-              " to save them directly from TSDR and upload to stitch:"
-          )
-
-          link_cols = st.columns(2)
-          for idx, (_, row) in enumerate(selected_rows.iterrows()):
-            reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
-            sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
-            num_to_use = (
-                reg_num
-                if reg_num and reg_num.lower() != "nan" and reg_num != ""
-                else sn_num
-            )
-            mark_txt = str(row.get("Mark", "Unknown"))
-
-            tsdr_url = (
-                f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
-            )
-            col_target = link_cols[0] if idx % 2 == 0 else link_cols[1]
-            col_target.markdown(
-                f"🔗 **[{idx+1}. {mark_txt} (Reg #{num_to_use})]({tsdr_url})**"
+          # If Akamai blocked any automated cloud downloads, show direct links + 1-click uploader
+          if st.session_state.get("download_errors"):
+            st.divider()
+            st.warning(
+                "⚠️ **Streamlit Cloud Firewall Notice:** The USPTO Akamai"
+                " firewall blocked direct automated downloads for some records."
+                " Click the links below to open TSDR, hit **Download > Status"
+                " (PDF)**, and upload to re-stitch:"
             )
 
-          uploaded_tsdr_files = st.file_uploader(
-              "Upload manually downloaded TSDR Status PDFs to re-stitch:",
-              type=["pdf"],
-              accept_multiple_files=True,
-              key="manual_tsdr_uploader",
-          )
+            link_cols = st.columns(2)
+            for idx, (_, row) in enumerate(selected_rows.iterrows()):
+              reg_num = str(row.get("Reg Number", "")).strip().replace(".0", "")
+              sn_num = str(row.get("Serial", "")).strip().replace(".0", "")
+              num_to_use = (
+                  reg_num
+                  if reg_num and reg_num.lower() != "nan" and reg_num != ""
+                  else sn_num
+              )
+              mark_txt = str(row.get("Mark", "Unknown"))
 
-          if uploaded_tsdr_files:
-            writer = PdfWriter()
-            cover_buffer = generate_exhibit_cover_pdf(selected_rows)
-            cover_reader = PdfReader(cover_buffer)
-            for page in cover_reader.pages:
-              writer.add_page(page)
+              tsdr_url = (
+                  f"https://tsdr.uspto.gov/#caseNumber={num_to_use}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch"
+              )
+              col_target = link_cols[0] if idx % 2 == 0 else link_cols[1]
+              col_target.markdown(
+                  f"🔗 **[{idx+1}. {mark_txt} (Reg #{num_to_use})]({tsdr_url})**"
+              )
 
-            for u_file in uploaded_tsdr_files:
-              reader = PdfReader(u_file)
-              for page in reader.pages:
+            uploaded_tsdr_files = st.file_uploader(
+                "Upload downloaded TSDR Status PDFs to re-stitch:",
+                type=["pdf"],
+                accept_multiple_files=True,
+                key="manual_tsdr_uploader",
+            )
+
+            if uploaded_tsdr_files:
+              writer = PdfWriter()
+              cover_buffer = generate_exhibit_cover_pdf(selected_rows)
+              cover_reader = PdfReader(cover_buffer)
+              for page in cover_reader.pages:
                 writer.add_page(page)
 
-            restitched_buffer = BytesIO()
-            writer.write(restitched_buffer)
-            restitched_buffer.seek(0)
+              for u_file in uploaded_tsdr_files:
+                reader = PdfReader(u_file)
+                for page in reader.pages:
+                  writer.add_page(page)
 
-            st.download_button(
-                label=(
-                    "📦 Download Re-Stitched Exhibit A Package"
-                    f" ({len(uploaded_tsdr_files)} Uploaded PDFs Attached)"
-                ),
-                data=restitched_buffer.getvalue(),
-                file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True,
-            )
+              restitched_buffer = BytesIO()
+              writer.write(restitched_buffer)
+              restitched_buffer.seek(0)
+
+              st.download_button(
+                  label=(
+                      "📦 Download Re-Stitched Exhibit A Package"
+                      f" ({len(uploaded_tsdr_files)} Uploaded PDFs Attached)"
+                  ),
+                  data=restitched_buffer.getvalue(),
+                  file_name="Exhibit_A_Bridging_Registrations_Package.pdf",
+                  mime="application/pdf",
+                  type="primary",
+                  width="stretch",
+              )
