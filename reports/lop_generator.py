@@ -100,13 +100,12 @@ def fetch_initial_data(serial_number):
                     
                 query = f"RN:{num_str}" if len(num_str) == 7 else f"SN:{num_str}"
                 search_input.fill(query)
+                
+                # Hit enter to run the search
                 page.keyboard.press("Enter")
                 
-                # Wait for results and click the first hyperlink
-                page.wait_for_selector("a[href*='/search-results/']", timeout=15000)
-                page.locator("a[href*='/search-results/']").first.click()
-
-                # THE BULLETPROOF WAIT: Wait for the exact Goods ID shown in your screenshot
+                # Because there is only 1 result, TMSearch instantly loads the detailed view!
+                # Do NOT wait for a link. Just wait for the Goods container to appear on screen.
                 page.wait_for_selector("#tm-detail_goods-and-services-goods-and-services", timeout=15000)
                 
                 # Execute Javascript to scrape the DOM elements based on the screenshots
@@ -122,7 +121,7 @@ def fetch_initial_data(serial_number):
                         markName = wmLabel.nextElementSibling.textContent.trim();
                     }
                     
-                    // 2. Goods Extraction (With Prefix/Date Cleanup included!)
+                    // 2. Goods Extraction (With Prefix/Date Cleanup included)
                     let goodsBox = document.querySelector('#tm-detail_goods-and-services-goods-and-services');
                     if (goodsBox) {
                         let pTags = goodsBox.querySelectorAll('p.mb-1, p.mb-2, p');
