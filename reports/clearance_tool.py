@@ -26,6 +26,7 @@ def run():
   if "clearance_report_data" not in st.session_state:
     st.session_state["clearance_report_data"] = None
 
+  # Initialize default values safely from session state
   def_client = st.session_state.get("client_name", "")
   def_attn = st.session_state.get("attention_name", "")
   def_email = st.session_state.get("client_email", "")
@@ -103,8 +104,7 @@ def run():
 
     clean_ttb_terms = list(set([raw_mark.strip(), squished_mark.strip()]))
 
-    # Use trailing wildcards (CM2:TERM*) instead of leading wildcards (CM2:*TERM*)
-    # to avoid triggering 100k+ ElasticSearch hit dumps at USPTO
+    # Use trailing wildcards (CM2:TERM*) to prevent ElasticSearch 100k+ hit dumps
     secondary_terms = []
     if dominant_term:
       web_mark_base += f' OR "{dominant_term}"'
@@ -306,7 +306,7 @@ def run():
           c_data["pdf_bytes"],
           file_name=f"{c_data['base_filename']}.pdf",
           mime="application/pdf",
-          width="stretch",
+          use_container_width=True,
           key="download_clearance_pdf",
       )
     with col_d2:
@@ -317,13 +317,13 @@ def run():
           mime=(
               "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
           ),
-          width="stretch",
+          use_container_width=True,
           key="download_clearance_docx",
       )
     with col_d3:
       if st.button(
           "☁️ Archive to Google Drive",
-          width="stretch",
+          use_container_width=True,
           key="archive_clearance",
       ):
         from utils.drive_uploader import upload_to_drive
