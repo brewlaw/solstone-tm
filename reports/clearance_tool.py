@@ -146,7 +146,7 @@ def run():
 
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (ISOLATED PLAYWRIGHT SESSION) ---
+        # --- 1. USPTO SEARCH (Isolated Playwright Session) ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
@@ -182,51 +182,27 @@ def run():
         except Exception as e:
           st.warning(f"USPTO scraping warning: {e}")
 
-        # Wipe USPTO browser memory before starting TTB
+        # Reclaim Chromium memory completely
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (FRESH ISOLATED PLAYWRIGHT SESSION) ---
+        # --- 2. TTB COLA SEARCH (Fast HTTP Requests, Zero Playwright RAM) ---
         ttb_data = []
         try:
-          with sync_playwright() as p2:
-            browser2 = p2.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process",
-                ],
-            )
-            ctx2 = browser2.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                    " AppleWebKit/537.36"
-                )
-            )
-            page2 = ctx2.new_page()
-            page2.set_default_timeout(15000)
+          start_date = "01/01/1985"
+          end_date = today.strftime("%m/%d/%Y")
 
-            start_date = "01/01/1985"
-            end_date = today.strftime("%m/%d/%Y")
-
-            raw_ttb_data = scrape_ttb(
-                page2, start_date, end_date, clean_ttb_terms
-            )
-            ctx2.close()
-            browser2.close()
-
-            if raw_ttb_data:
-              unique_ttb = {
-                  item["ttb_id"]: item
-                  for item in raw_ttb_data
-                  if "ttb_id" in item
-              }
-              ttb_data = list(unique_ttb.values())
+          raw_ttb_data = scrape_ttb(
+              None, start_date, end_date, clean_ttb_terms
+          )
+          if raw_ttb_data:
+            unique_ttb = {
+                item["ttb_id"]: item
+                for item in raw_ttb_data
+                if "ttb_id" in item
+            }
+            ttb_data = list(unique_ttb.values())
         except Exception as e:
           st.warning(f"TTB COLA search warning: {e}")
-
-        gc.collect()
 
         # --- 3. GOOGLE SEARCH ---
         google_data = []

@@ -1,111 +1,101 @@
+from html.parser import HTMLParser
 import logging
-from bs4 import BeautifulSoup
+import urllib.parse
+import urllib.request
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def scrape_ttb(page, start_date, end_date, brand_terms):
-  """Scrapes TTB Public COLA Registry for specified brand terms and date range.
+class TTBTableParser(HTMLParser):
 
-  Args:
-      page: Active Playwright page context.
-      start_date (str): Start date in MM/DD/YYYY format.
-      end_date (str): End date in MM/DD/YYYY format.
-      brand_terms (list): List of brand name terms to search.
+  def __init__(self):
+    super().__init__()
+    self.in_td = False
+    self.in_tr = False
+    self.current_row = []
+    self.rows = []
+    self.current_text = ""
 
-  Returns:
-      list: Extracted COLA records as dictionaries.
+  def handle_starttag(self, tag, attrs):
+    if tag == "tr":
+      self.in_tr = True
+      self.current_row = []
+    elif tag == "td" and self.in_tr:
+      self.in_td = True
+      self.current_text = ""
+
+  def handle_endtag(self, tag):
+    if tag == "td" and self.in_td:
+      self.in_td = False
+      self.current_row.append(self.current_text.strip())
+    elif tag == "tr" and self.in_tr:
+      self.in_tr = False
+      if self.current_row:
+        self.rows.append(self.current_row)
+
+  def handle_data(self, data):
+    if self.in_td:
+      self.current_text += data
+
+
+def scrape_ttb(page_or_dummy, start_date, end_date, brand_terms):
+  """Scrapes TTB COLA Registry via fast, lightweight HTTP POST requests.
+
+  Accepts `page_or_dummy` for backwards compatibility with call signatures.
   """
   results = []
   if not brand_terms:
     return results
 
-  # Clean SQL wildcards (%) from terms so TTB search engine reads normal text
-  clean_terms = []
-  for term in brand_terms:
-    cleaned = str(term).replace("%", "").strip()
-    if cleaned and cleaned not in clean_terms:
-      clean_terms.append(cleaned)
+  clean_terms = list(
+      set([
+          str(t).replace("%", "").strip()
+          for t in brand_terms
+          if str(t).replace("%", "").strip()
+      ])
+  )
+  url = "https://www.ttbonline.gov/colasonline/publicSearchColasAdvanced.do"
 
-  if not clean_terms:
-    return results
-
-  ttb_url = "https://www.ttbonline.gov/colasonline/publicSearchColasAdvanced.do"
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      ),
+      "Content-Type": "application/x-www-form-urlencoded",
+  }
 
   for term in clean_terms:
     try:
-      logger.info(
-          f"Navigating to TTB for term '{term}' ({start_date} - {end_date})..."
-      )
-      page.goto(ttb_url, timeout=30000, wait_until="domcontentloaded")
-
-      # Wait for the advanced search form
-      page.wait_for_selector(
-          "form[name='publicSearchColasAdvancedForm'], input[name='searchCriteria.brandName'], input[name='brandName']",
-          timeout=15000,
-      )
-
-      # Fill Brand Name field (try primary and fallback selectors)
-      brand_selector = (
-          "input[name='searchCriteria.brandName']"
-          if page.query_selector("input[name='searchCriteria.brandName']")
-          else "input[name='brandName']"
-      )
-      page.fill(brand_selector, term)
-
-      # Fill Date Range fields if available
-      date_from_sel = "input[name='searchCriteria.issueDateFrom']"
-      date_to_sel = "input[name='searchCriteria.issueDateTo']"
-
-      if page.query_selector(date_from_sel):
-        page.fill(date_from_sel, start_date)
-      if page.query_selector(date_to_sel):
-        page.fill(date_to_sel, end_date)
-
-      # Submit the search form
-      submit_button = (
-          "input[name='search']"
-          if page.query_selector("input[name='search']")
-          else "input[type='submit']"
-      )
-      page.click(submit_button)
-
-      # Wait for results table or no-results message
-      page.wait_for_selector(
-          "table.searchResultsTable, table[summary*='search results'], body",
-          timeout=20000,
+      data = {
+          "action": "search",
+          "searchCriteria.brandName": term,
+          "searchCriteria.issueDateFrom": start_date,
+          "searchCriteria.issueDateTo": end_date,
+      }
+      encoded_data = urllib.parse.urlencode(data).encode("utf-8")
+      req = urllib.request.Request(
+          url, data=encoded_data, headers=headers, method="POST"
       )
 
-      html = page.content()
-      soup = BeautifulSoup(html, "html.parser")
+      with urllib.request.urlopen(req, timeout=12) as response:
+        html_content = response.read().decode("utf-8", errors="ignore")
 
-      # Parse results table rows
-      rows = soup.select("table.searchResultsTable tr, table tr")
-      for row in rows:
-        cols = row.find_all("td")
-        if len(cols) >= 5:
-          col_texts = [c.get_text(strip=True) for c in cols]
+      parser = TTBTableParser()
+      parser.feed(html_content)
 
-          # Extract TTB ID, Brand Name, Fanciful Name, Class, Issue Date
+      for col_texts in parser.rows:
+        if len(col_texts) >= 5:
           ttb_id = col_texts[0]
           if ttb_id and (ttb_id.isdigit() or len(ttb_id) >= 8):
-            brand_name = col_texts[1] if len(col_texts) > 1 else ""
-            fanciful_name = col_texts[2] if len(col_texts) > 2 else ""
-            class_desc = col_texts[3] if len(col_texts) > 3 else ""
-            issue_date = col_texts[4] if len(col_texts) > 4 else ""
-
             results.append({
                 "ttb_id": ttb_id,
-                "brand_name": brand_name,
-                "fanciful_name": fanciful_name,
-                "class_desc": class_desc,
-                "issue_date": issue_date,
+                "brand_name": col_texts[1] if len(col_texts) > 1 else "",
+                "fanciful_name": col_texts[2] if len(col_texts) > 2 else "",
+                "class_desc": col_texts[3] if len(col_texts) > 3 else "",
+                "issue_date": col_texts[4] if len(col_texts) > 4 else "",
                 "search_term": term,
             })
-
     except Exception as e:
-      logger.warning(f"TTB scraping error for '{term}': {e}")
-      continue
+      logger.warning(f"TTB HTTP request error for '{term}': {e}")
 
   return results
