@@ -16,6 +16,13 @@ if not os.path.exists(OUTPUT_DIR):
   os.makedirs(OUTPUT_DIR)
 
 
+def block_heavy_assets(route):
+  if route.request.resource_type in ["image", "font", "media"]:
+    route.abort()
+  else:
+    route.continue_()
+
+
 def run():
   st.header("Full Trademark Clearance Search")
   st.write(
@@ -137,84 +144,91 @@ def run():
         f"{safe_mark}-USPTO-EXPORT-{today.strftime('%Y-%m-%d')}_{timestamp}.xlsx",
     )
 
-    with st.spinner(
-        "Scraping USPTO, TTB, and Google... This may take a few minutes."
-    ):
+    with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # SINGLE CHROMIUM PROCESS FOR ALL SCRAPING TASKS
-        with sync_playwright() as p:
-          browser = p.chromium.launch(
-              headless=True,
-              args=[
-                  "--no-sandbox",
-                  "--disable-dev-shm-usage",
-                  "--disable-gpu",
-                  "--single-process",
-                  '--js-flags="--max-old-space-size=256"',
-              ],
-          )
-
-          # 1. USPTO Search
-          uspto_data = []
-          try:
-            ctx_uspto = browser.new_context(
+        # --- 1. USPTO SEARCH (ISOLATED PLAYWRIGHT SESSION) ---
+        uspto_data = []
+        try:
+          with sync_playwright() as p1:
+            browser1 = p1.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                    '--js-flags="--max-old-space-size=256"',
+                ],
+            )
+            ctx1 = browser1.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                     " AppleWebKit/537.36"
                 ),
                 accept_downloads=True,
             )
-            page_uspto = ctx_uspto.new_page()
-            page_uspto.set_default_timeout(30000)
+            page1 = ctx1.new_page()
+            page1.set_default_timeout(25000)
+            page1.route("**/*", block_heavy_assets)
+
             uspto_data = scrape_uspto(
-                page_uspto,
+                page1,
                 primary_uspto_query,
                 excel_filename,
                 secondary_uspto_query,
             )
-            ctx_uspto.close()
-          except Exception as e:
-            st.warning(f"USPTO scraping warning: {e}")
+            ctx1.close()
+            browser1.close()
+        except Exception as e:
+          st.warning(f"USPTO scraping warning: {e}")
 
-          gc.collect()
+        # Wipe USPTO browser memory before starting TTB
+        gc.collect()
 
-          # 2. TTB COLA Search (Lightweight contexts per chunk)
-          ttb_chunks = [
-              ("01/01/1995", "12/31/2009"),
-              ("01/01/2010", "12/31/2019"),
-              ("01/01/2020", today.strftime("%m/%d/%Y")),
-          ]
-          raw_ttb_data = []
+        # --- 2. TTB COLA SEARCH (FRESH ISOLATED PLAYWRIGHT SESSION) ---
+        ttb_data = []
+        try:
+          with sync_playwright() as p2:
+            browser2 = p2.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                ],
+            )
+            ctx2 = browser2.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    " AppleWebKit/537.36"
+                )
+            )
+            page2 = ctx2.new_page()
+            page2.set_default_timeout(15000)
 
-          for start_date, end_date in ttb_chunks:
-            try:
-              ctx_ttb = browser.new_context(
-                  user_agent=(
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                      " AppleWebKit/537.36"
-                  )
-              )
-              page_ttb = ctx_ttb.new_page()
-              page_ttb.set_default_timeout(20000)
+            start_date = "01/01/1985"
+            end_date = today.strftime("%m/%d/%Y")
 
-              chunk_results = scrape_ttb(
-                  page_ttb, start_date, end_date, clean_ttb_terms
-              )
-              if chunk_results:
-                raw_ttb_data.extend(chunk_results)
+            raw_ttb_data = scrape_ttb(
+                page2, start_date, end_date, clean_ttb_terms
+            )
+            ctx2.close()
+            browser2.close()
 
-              ctx_ttb.close()
-            except Exception as e:
-              st.warning(f"TTB chunk ({start_date} to {end_date}) warning: {e}")
+            if raw_ttb_data:
+              unique_ttb = {
+                  item["ttb_id"]: item
+                  for item in raw_ttb_data
+                  if "ttb_id" in item
+              }
+              ttb_data = list(unique_ttb.values())
+        except Exception as e:
+          st.warning(f"TTB COLA search warning: {e}")
 
-          browser.close()
+        gc.collect()
 
-        unique_ttb = {
-            item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
-        }
-        ttb_data = list(unique_ttb.values())
-
-        # 3. Google Web Search
+        # --- 3. GOOGLE SEARCH ---
         google_data = []
         try:
           google_date_from = "1900-01-01"
@@ -225,7 +239,7 @@ def run():
         except Exception as e:
           st.warning(f"Google web search warning: {e}")
 
-        # Report Generation
+        # --- REPORT GENERATION ---
         base_filename = f"Clearance_Report_{safe_mark}"
         report_title = f"Clearance Report - {raw_mark.upper()}"
         pdf_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.pdf")
@@ -273,7 +287,7 @@ def run():
       except Exception as e:
         st.error(f"Error during search execution: {e}")
 
-  # Display Outputs
+  # --- DISPLAY OUTPUTS ---
   if st.session_state.get("clearance_report_data"):
     c_data = st.session_state["clearance_report_data"]
     st.success("Search & Report Generation Complete!")
