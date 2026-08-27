@@ -5,36 +5,29 @@ logger = logging.getLogger(__name__)
 
 
 def scrape_ttb(page, start_date, end_date, brand_terms):
-  """Scrapes TTB Public COLA Registry using Playwright browser page."""
+  """Scrapes TTB Public COLA Registry using Playwright browser page with wildcards intact."""
   results = []
   if not brand_terms or not page:
     return results
 
-  clean_terms = []
-  for term in brand_terms:
-    cleaned = str(term).replace("%", "").strip()
-    if cleaned and cleaned not in clean_terms:
-      clean_terms.append(cleaned)
-
-  if not clean_terms:
-    return results
-
   ttb_url = "https://www.ttbonline.gov/colasonline/publicSearchColasAdvanced.do"
 
-  for term in clean_terms:
+  for term in brand_terms:
+    if not term:
+      continue
     try:
       logger.info(
           f"Navigating to TTB for term '{term}' ({start_date} - {end_date})..."
       )
       page.goto(ttb_url, timeout=25000, wait_until="domcontentloaded")
 
-      # Wait for search form to render
+      # Wait for search form
       page.wait_for_selector(
           "input[name='searchCriteria.brandName'], input[name='brandName']",
           timeout=15000,
       )
 
-      # Target the brand name field
+      # Fill exact wildcard term into brand name field
       brand_sel = (
           "input[name='searchCriteria.brandName']"
           if page.query_selector("input[name='searchCriteria.brandName']")
@@ -50,7 +43,7 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
       if page.query_selector(date_to_sel):
         page.fill(date_to_sel, end_date)
 
-      # Click submit search button
+      # Submit form
       submit_btn = (
           "input[name='search']"
           if page.query_selector("input[name='search']")
@@ -68,11 +61,11 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
       except Exception:
         logger.info(
             f"TTB search for '{term}' ({start_date}-{end_date}) yielded no"
-            " results table or exceeded limit."
+            " results table or exceeded 500 limit."
         )
         continue
 
-      # Extract table rows
+      # Parse table rows
       rows = page.query_selector_all(
           "table.searchResultsTable tr, table[summary*='search results'] tr,"
           " table tr"
@@ -83,25 +76,16 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
           col_texts = [c.inner_text().strip() for c in cols]
           first_cell = col_texts[0]
 
-          # Verify cell 0 is a valid 14-digit TTB ID
+          # Verify cell 0 is a valid TTB ID
           if first_cell and (
               first_cell.isdigit()
               or (len(first_cell) >= 8 and first_cell[:4].isdigit())
           ):
-            # TTB COLA Table Column Index Mapping:
-            # Col 0: TTB ID
-            # Col 1: Vendor Code / Permit No
-            # Col 2: Serial No
-            # Col 3: Brand Name
-            # Col 4: Fanciful Name
-            # Col 5: Class/Type Code & Description
-            # Col 6+: Origin / Status / Issue Date
-
             brand_name = col_texts[3] if len(col_texts) > 3 else ""
             fanciful_name = col_texts[4] if len(col_texts) > 4 else ""
             class_desc = col_texts[5] if len(col_texts) > 5 else ""
 
-            # Extract MM/DD/YYYY date string across all row cells
+            # Find date MM/DD/YYYY in row
             issue_date = ""
             for text in reversed(col_texts):
               date_match = re.search(r"\b\d{2}/\d{2}/\d{4}\b", text)

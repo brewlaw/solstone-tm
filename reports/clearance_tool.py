@@ -100,25 +100,26 @@ def run():
         else uspto_spaced
     )
 
-    clean_ttb_terms = list(set([raw_mark.strip(), squished_mark.strip()]))
+    # Restored TTB Wildcard construction from original working version
+    ttb_marks_list = ["%" + "%".join(words) + "%"]
 
     secondary_terms = []
     if dominant_term:
       web_mark_base += f' OR "{dominant_term}"'
       secondary_terms.append(f"(CM2:{dominant_term}*)")
-      clean_ttb_terms.append(dominant_term)
+      ttb_marks_list.append(f"%{dominant_term}%")
     if phonetic_term:
       web_mark_base += f' OR "{phonetic_term}"'
       secondary_terms.append(f"(CM2:{phonetic_term}*)")
-      clean_ttb_terms.append(phonetic_term)
+      ttb_marks_list.append(f"%{phonetic_term}%")
     if conceptual_term:
       web_mark_base += f' OR "{conceptual_term}"'
       secondary_terms.append(f"(CM2:{conceptual_term}*)")
-      clean_ttb_terms.append(conceptual_term)
+      ttb_marks_list.append(f"%{conceptual_term}%")
     if substring_term:
       web_mark_base += f' OR "{substring_term}"'
       secondary_terms.append(f"(CM2:{substring_term}*)")
-      clean_ttb_terms.append(substring_term)
+      ttb_marks_list.append(f"%{substring_term}%")
 
     class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
     date_filter = ""
@@ -139,13 +140,19 @@ def run():
 
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (Isolated Playwright Session) ---
+        # --- 1. USPTO SEARCH ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
             browser1 = p1.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                    '--js-flags="--max-old-space-size=256"',
+                ],
             )
             ctx1 = browser1.new_context(
                 user_agent=(
@@ -170,11 +177,11 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (FRESH BROWSER INSTANCE PER DATE CHUNK) ---
+        # --- 2. TTB COLA SEARCH ---
         ttb_chunks = [
-            ("01/01/2018", today.strftime("%m/%d/%Y")),
-            ("01/01/2010", "12/31/2017"),
-            ("01/01/1995", "12/31/2009"),
+            ("01/01/1985", "12/31/1999"),
+            ("01/01/2000", "12/31/2014"),
+            ("01/01/2015", today.strftime("%m/%d/%Y")),
         ]
         raw_ttb_data = []
 
@@ -199,7 +206,10 @@ def run():
               page_chunk.set_default_timeout(20000)
 
               chunk_results = scrape_ttb(
-                  page_chunk, start_date, end_date, clean_ttb_terms
+                  page_chunk,
+                  start_date,
+                  end_date,
+                  list(set(ttb_marks_list)),
               )
               if chunk_results:
                 raw_ttb_data.extend(chunk_results)
@@ -207,9 +217,7 @@ def run():
               ctx_chunk.close()
               browser_chunk.close()
           except Exception as e:
-            st.warning(
-                f"TTB chunk ({start_date} to {end_date}) warning: {e}"
-            )
+            st.warning(f"TTB chunk ({start_date} to {end_date}) warning: {e}")
 
           gc.collect()
 
