@@ -100,7 +100,7 @@ def run():
         else uspto_spaced
     )
 
-    # Reconstruct SQL wildcards for TTB search
+    # Reconstruct wildcard list for TTB
     ttb_marks_list = ["%" + "%".join(words) + "%"]
 
     secondary_terms = []
@@ -121,7 +121,7 @@ def run():
       secondary_terms.append(f"(CM2:{substring_term}*)")
       ttb_marks_list.append(f"%{substring_term}%")
 
-    all_ttb_terms = list(
+    clean_ttb_terms = list(
         dict.fromkeys(
             ttb_marks_list + [raw_mark.strip(), squished_mark.strip()]
         )
@@ -144,20 +144,22 @@ def run():
         f"{safe_mark}-USPTO-EXPORT-{today.strftime('%Y-%m-%d')}_{timestamp}.xlsx",
     )
 
+    stealth_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+    ]
+
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (Isolated Session) ---
+        # --- 1. USPTO SEARCH ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
             browser1 = p1.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    '--js-flags="--max-old-space-size=256"',
-                ],
+                args=stealth_args + ['--js-flags="--max-old-space-size=256"'],
             )
             ctx1 = browser1.new_context(
                 user_agent=(
@@ -182,7 +184,7 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (ISOLATED FRESH SESSION PER CHUNK) ---
+        # --- 2. TTB COLA SEARCH ---
         ttb_chunks = [
             ("01/01/2018", today.strftime("%m/%d/%Y")),
             ("01/01/2010", "12/31/2017"),
@@ -194,24 +196,22 @@ def run():
           try:
             with sync_playwright() as p_chunk:
               browser_chunk = p_chunk.chromium.launch(
-                  headless=True,
-                  args=[
-                      "--no-sandbox",
-                      "--disable-dev-shm-usage",
-                      "--disable-gpu",
-                  ],
+                  headless=True, args=stealth_args
               )
               ctx_chunk = browser_chunk.new_context(
                   user_agent=(
                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                      " AppleWebKit/537.36"
-                  )
+                      " AppleWebKit/537.36 (KHTML, like Gecko)"
+                      " Chrome/122.0.0.0 Safari/537.36"
+                  ),
+                  viewport={"width": 1280, "height": 800},
+                  locale="en-US",
               )
               page_chunk = ctx_chunk.new_page()
-              page_chunk.set_default_timeout(20000)
+              page_chunk.set_default_timeout(35000)
 
               chunk_results = scrape_ttb(
-                  page_chunk, start_date, end_date, all_ttb_terms
+                  page_chunk, start_date, end_date, clean_ttb_terms
               )
               if chunk_results:
                 raw_ttb_data.extend(chunk_results)
