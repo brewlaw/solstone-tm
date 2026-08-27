@@ -1,131 +1,93 @@
-from html.parser import HTMLParser
-import http.cookiejar
 import logging
-import urllib.parse
-import urllib.request
 
 logger = logging.getLogger(__name__)
 
 
-class TTBTableParser(HTMLParser):
-
-  def __init__(self):
-    super().__init__()
-    self.in_tr = False
-    self.in_td = False
-    self.current_row = []
-    self.rows = []
-    self.current_text = ""
-
-  def handle_starttag(self, tag, attrs):
-    if tag == "tr":
-      self.in_tr = True
-      self.current_row = []
-    elif tag == "td" and self.in_tr:
-      self.in_td = True
-      self.current_text = ""
-
-  def handle_endtag(self, tag):
-    if tag == "td" and self.in_td:
-      self.in_td = False
-      self.current_row.append(" ".join(self.current_text.split()))
-    elif tag == "tr" and self.in_tr:
-      self.in_tr = False
-      if len(self.current_row) >= 5:
-        # Verify column 0 contains a valid TTB ID
-        first_cell = self.current_row[0].strip()
-        if first_cell and (first_cell.isdigit() or len(first_cell) >= 8):
-          self.rows.append(self.current_row)
-
-  def handle_data(self, data):
-    if self.in_td:
-      self.current_text += data
-
-
-def scrape_ttb(page_or_dummy, start_date, end_date, brand_terms):
-  """Scrapes TTB COLA Registry using two-step HTTP Session requests (GET -> POST).
-
-  Accepts `page_or_dummy` to maintain compatibility with clearance_tool call
-  signatures.
-  """
+def scrape_ttb(page, start_date, end_date, brand_terms):
+  """Scrapes TTB Public COLA Registry using Playwright browser page."""
   results = []
-  if not brand_terms:
+  if not brand_terms or not page:
     return results
 
-  clean_terms = list(
-      set([
-          str(t).replace("%", "").strip()
-          for t in brand_terms
-          if str(t).replace("%", "").strip()
-      ])
-  )
+  clean_terms = []
+  for term in brand_terms:
+    cleaned = str(term).replace("%", "").strip()
+    if cleaned and cleaned not in clean_terms:
+      clean_terms.append(cleaned)
+
   if not clean_terms:
     return results
 
-  # CookieJar retains JSESSIONID cookie across GET and POST steps
-  cj = http.cookiejar.CookieJar()
-  opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      ),
-      "Accept": (
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      ),
-      "Accept-Language": "en-US,en;q=0.9",
-  }
-
-  base_url = "https://www.ttbonline.gov/colasonline/publicSearchColasAdvanced.do"
+  ttb_url = "https://www.ttbonline.gov/colasonline/publicSearchColasAdvanced.do"
 
   for term in clean_terms:
     try:
-      # Step 1: GET request to initialize session cookie
-      get_req = urllib.request.Request(base_url, headers=headers)
-      with opener.open(get_req, timeout=10) as resp:
-        _ = resp.read()
+      logger.info(f"Navigating to TTB for term '{term}'...")
+      page.goto(ttb_url, timeout=20000, wait_until="domcontentloaded")
 
-      # Step 2: POST form payload
-      post_data = urllib.parse.urlencode({
-          "action": "search",
-          "searchCriteria.brandName": term,
-          "searchCriteria.issueDateFrom": start_date,
-          "searchCriteria.issueDateTo": end_date,
-          "search": "Search",
-      }).encode("utf-8")
-
-      post_headers = headers.copy()
-      post_headers["Content-Type"] = "application/x-www-form-urlencoded"
-      post_req = urllib.request.Request(
-          base_url, data=post_data, headers=post_headers, method="POST"
+      # Wait for search form to render
+      page.wait_for_selector(
+          "input[name='searchCriteria.brandName'], input[name='brandName']",
+          timeout=10000,
       )
 
-      with opener.open(post_req, timeout=15) as resp:
-        html_content = resp.read().decode("utf-8", errors="ignore")
+      # Target the brand name field
+      brand_sel = (
+          "input[name='searchCriteria.brandName']"
+          if page.query_selector("input[name='searchCriteria.brandName']")
+          else "input[name='brandName']"
+      )
+      page.fill(brand_sel, term)
 
-      # Step 3: Parse response rows
-      parser = TTBTableParser()
-      parser.feed(html_content)
+      date_from_sel = "input[name='searchCriteria.issueDateFrom']"
+      date_to_sel = "input[name='searchCriteria.issueDateTo']"
 
-      for col_texts in parser.rows:
-        ttb_id = col_texts[0].strip()
-        brand_name = col_texts[1].strip() if len(col_texts) > 1 else ""
-        fanciful_name = col_texts[2].strip() if len(col_texts) > 2 else ""
-        class_desc = col_texts[3].strip() if len(col_texts) > 3 else ""
-        issue_date = col_texts[4].strip() if len(col_texts) > 4 else ""
+      if page.query_selector(date_from_sel):
+        page.fill(date_from_sel, start_date)
+      if page.query_selector(date_to_sel):
+        page.fill(date_to_sel, end_date)
 
-        results.append({
-            "ttb_id": ttb_id,
-            "brand_name": brand_name,
-            "fanciful_name": fanciful_name,
-            "class_desc": class_desc,
-            "issue_date": issue_date,
-            "search_term": term,
-        })
+      # Click submit search button
+      submit_btn = (
+          "input[name='search']"
+          if page.query_selector("input[name='search']")
+          else "input[type='submit']"
+      )
+      page.click(submit_btn)
+
+      # Wait for results table
+      try:
+        page.wait_for_selector(
+            "table.searchResultsTable, table[summary*='search results']",
+            timeout=12000,
+        )
+      except Exception:
+        logger.info(
+            f"TTB search for '{term}' returned no results table or hit limit."
+        )
+        continue
+
+      # Extract table rows
+      rows = page.query_selector_all(
+          "table.searchResultsTable tr, table[summary*='search results'] tr"
+      )
+      for row in rows:
+        cols = row.query_selector_all("td")
+        if len(cols) >= 5:
+          col_texts = [c.inner_text().strip() for c in cols]
+          ttb_id = col_texts[0]
+          if ttb_id and (ttb_id.isdigit() or len(ttb_id) >= 8):
+            results.append({
+                "ttb_id": ttb_id,
+                "brand_name": col_texts[1] if len(col_texts) > 1 else "",
+                "fanciful_name": col_texts[2] if len(col_texts) > 2 else "",
+                "class_desc": col_texts[3] if len(col_texts) > 3 else "",
+                "issue_date": col_texts[4] if len(col_texts) > 4 else "",
+                "search_term": term,
+            })
 
     except Exception as e:
-      logger.warning(f"TTB HTTP scraping error for term '{term}': {e}")
+      logger.warning(f"TTB scraping warning for '{term}': {e}")
       continue
 
   return results
