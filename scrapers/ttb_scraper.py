@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 
 def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
-  """Scrapes TTB COLA Registry extracting TTB IDs from link URLs and text cells."""
+  """Scrapes TTB COLA Registry with DOM inspection fixes."""
   ttb_results = []
   seen_ttb_ids = set()
 
@@ -16,7 +16,6 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
   if not mark_list or not page:
     return ttb_results
 
-  # Clean search variations
   clean_terms = []
   for m in mark_list:
     t = str(m).strip()
@@ -37,14 +36,12 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
             wait_until="domcontentloaded",
         )
 
-        # Handle disclaimer modal if present
         if page.locator("input[value='I Agree']").is_visible():
           page.locator("input[value='I Agree']").evaluate(
               "node => node.click()"
           )
           page.wait_for_timeout(1000)
 
-        # Fill inputs using exact IDs from DevTools inspection
         if page.locator("#datecompletedfrom").is_visible():
           page.locator("#datecompletedfrom").fill(ttb_date_from)
         else:
@@ -66,7 +63,6 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
               "input[name='searchCriteria.productOrFancifulName']"
           ).fill(mark)
 
-        # Select 'Either' radio button
         try:
           page.locator("input[value='E']").evaluate("node => node.click()")
         except Exception:
@@ -74,13 +70,11 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
 
         page.wait_for_timeout(300)
 
-        # Submit form
         search_btn = page.locator(
             "input[value='Search'], input[alt*='search'], input[type='submit']"
         ).first
         search_btn.evaluate("node => node.click()")
 
-        # Wait for results page
         try:
           page.wait_for_selector(
               "a:has-text('Save Search Results To File'), div.box table,"
@@ -94,7 +88,7 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
         variation_count = 0
         page_count = 0
 
-        while page_count < 3:  # Cap at top 60 records per term for speed
+        while page_count < 3:
           page_count += 1
           rows = page.locator("tr").all()
 
@@ -113,10 +107,7 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
             if len(cols) < 3:
               continue
 
-            # --- EXTRACT TTB ID FROM LINKS OR CELLS ---
             ttb_id = None
-
-            # 1. Search href attributes in the row for ttbid=XXXXX
             links = row.locator("a").all()
             for link in links:
               href = link.get_attribute("href") or ""
@@ -130,7 +121,6 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                 ttb_id = link_text
                 break
 
-            # 2. Fallback: Search cells for 8+ digit numeric ID
             if not ttb_id:
               for cell in cols:
                 cell_clean = cell.replace("-", "").strip()
@@ -138,7 +128,6 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                   ttb_id = cell_clean
                   break
 
-            # 3. Fallback: Generate unique ID from row content if valid brand row
             if not ttb_id and len(cols) >= 4:
               row_hash = abs(hash("".join(cols))) % 100000000
               ttb_id = f"COLA_{row_hash}"
@@ -147,11 +136,9 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
               seen_ttb_ids.add(ttb_id)
               variation_count += 1
 
-              # Extract Date MM/DD/YYYY
               date_match = re.search(r"\b\d{2}/\d{2}/\d{4}\b", row_text)
               approval_dt = date_match.group(0) if date_match else ttb_date_from
 
-              # Column Mapping: [Fanciful Name, Brand Name, Origin, Origin Desc, Class/Type, Class/Type Desc]
               fanciful_nm = cols[0] if len(cols) > 0 else "N/A"
               brand_nm = cols[1] if len(cols) > 1 else "N/A"
               origin_desc = cols[3] if len(cols) > 3 else "N/A"
@@ -172,7 +159,6 @@ def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
                   "search_term": mark,
               })
 
-          # Handle Next page link
           next_btn = page.locator("a:has-text('Next')").first
           if next_btn.is_visible():
             btn_class = next_btn.get_attribute("class") or ""
