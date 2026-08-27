@@ -100,7 +100,7 @@ def run():
         else uspto_spaced
     )
 
-    # Reconstruct wildcard list for TTB
+    # Build TTB wildcard terms
     ttb_marks_list = ["%" + "%".join(words) + "%"]
 
     secondary_terms = []
@@ -111,15 +111,12 @@ def run():
     if phonetic_term:
       web_mark_base += f' OR "{phonetic_term}"'
       secondary_terms.append(f"(CM2:{phonetic_term}*)")
-      ttb_marks_list.append(f"%{phonetic_term}%")
     if conceptual_term:
       web_mark_base += f' OR "{conceptual_term}"'
       secondary_terms.append(f"(CM2:{conceptual_term}*)")
-      ttb_marks_list.append(f"%{conceptual_term}%")
     if substring_term:
       web_mark_base += f' OR "{substring_term}"'
       secondary_terms.append(f"(CM2:{substring_term}*)")
-      ttb_marks_list.append(f"%{substring_term}%")
 
     clean_ttb_terms = list(
         dict.fromkeys(
@@ -192,36 +189,41 @@ def run():
         ]
         raw_ttb_data = []
 
-        for start_date, end_date in ttb_chunks:
-          try:
-            with sync_playwright() as p_chunk:
-              browser_chunk = p_chunk.chromium.launch(
-                  headless=True, args=stealth_args
-              )
-              ctx_chunk = browser_chunk.new_context(
-                  user_agent=(
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                      " AppleWebKit/537.36 (KHTML, like Gecko)"
-                      " Chrome/122.0.0.0 Safari/537.36"
-                  ),
-                  viewport={"width": 1280, "height": 800},
-                  locale="en-US",
-              )
-              page_chunk = ctx_chunk.new_page()
-              page_chunk.set_default_timeout(35000)
+        try:
+          with sync_playwright() as p2:
+            browser2 = p2.chromium.launch(headless=True, args=stealth_args)
+            ctx2 = browser2.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    " AppleWebKit/537.36 (KHTML, like Gecko)"
+                    " Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
 
-              chunk_results = scrape_ttb(
-                  page_chunk, start_date, end_date, clean_ttb_terms
-              )
-              if chunk_results:
-                raw_ttb_data.extend(chunk_results)
+            for start_date, end_date in ttb_chunks:
+              try:
+                page2 = ctx2.new_page()
+                page2.set_default_timeout(20000)
 
-              ctx_chunk.close()
-              browser_chunk.close()
-          except Exception as e:
-            st.warning(f"TTB chunk ({start_date} to {end_date}) warning: {e}")
+                chunk_results = scrape_ttb(
+                    page2, start_date, end_date, clean_ttb_terms
+                )
+                if chunk_results:
+                  raw_ttb_data.extend(chunk_results)
 
-          gc.collect()
+                page2.close()
+              except Exception as e:
+                st.warning(
+                    f"TTB chunk ({start_date} to {end_date}) warning: {e}"
+                )
+
+            ctx2.close()
+            browser2.close()
+        except Exception as e:
+          st.warning(f"TTB COLA search warning: {e}")
+
+        gc.collect()
 
         unique_ttb = {
             item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
