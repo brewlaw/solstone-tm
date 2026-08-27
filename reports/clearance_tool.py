@@ -3,9 +3,7 @@ import gc
 import os
 import re
 from playwright.sync_api import sync_playwright
-import requests
 import streamlit as st
-import urllib3
 
 from reports.docx_generator_2 import generate_docx_2
 from reports.pdf_generator import generate_pdf
@@ -13,29 +11,9 @@ from scrapers.google_scraper import scrape_google
 from scrapers.ttb_scraper import scrape_ttb
 from scrapers.uspto_scraper import scrape_uspto
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
   os.makedirs(OUTPUT_DIR)
-
-
-def test_ttb_connection():
-  """Diagnostic utility to inspect TTB HTTP response directly in Streamlit."""
-  url = "https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do"
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      )
-  }
-  try:
-    resp = requests.get(url, headers=headers, verify=False, timeout=15)
-    st.success(f"TTB HTTP Response Status: {resp.status_code}")
-    st.caption("Raw HTML snippet returned by TTB server:")
-    st.code(resp.text[:1000], language="html")
-  except Exception as e:
-    st.error(f"TTB Direct HTTP Connection Failed: {e}")
 
 
 def run():
@@ -44,15 +22,6 @@ def run():
       "Run a comprehensive, all-time clearance search across USPTO, TTB, and"
       " Google."
   )
-
-  # --- DIAGNOSTIC PANEL ---
-  with st.expander("🛠️ Debug & Connection Diagnostics", expanded=False):
-    st.caption(
-        "Run this test to verify if Streamlit Cloud can connect to"
-        " ttbonline.gov without SSL or IP blocks."
-    )
-    if st.button("Test TTB Server Connection", key="btn_test_ttb"):
-      test_ttb_connection()
 
   if "clearance_report_data" not in st.session_state:
     st.session_state["clearance_report_data"] = None
@@ -183,7 +152,7 @@ def run():
 
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (Playwright Browser Session) ---
+        # --- 1. USPTO SEARCH ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
@@ -214,22 +183,49 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (Fast Direct HTTP Request) ---
-        ttb_data = []
-        try:
-          start_date = "01/01/1985"
-          end_date = today.strftime("%m/%d/%Y")
+        # --- 2. TTB COLA SEARCH (Playwright with Akamai Stealth Context) ---
+        ttb_chunks = [
+            ("01/01/2018", today.strftime("%m/%d/%Y")),
+            ("01/01/2010", "12/31/2017"),
+            ("01/01/1995", "12/31/2009"),
+        ]
+        raw_ttb_data = []
 
-          raw_ttb_data = scrape_ttb(start_date, end_date, clean_ttb_terms)
-          if raw_ttb_data:
-            unique_ttb = {
-                item["ttb_id"]: item
-                for item in raw_ttb_data
-                if "ttb_id" in item
-            }
-            ttb_data = list(unique_ttb.values())
-        except Exception as e:
-          st.warning(f"TTB COLA search warning: {e}")
+        for start_date, end_date in ttb_chunks:
+          try:
+            with sync_playwright() as p_chunk:
+              browser_chunk = p_chunk.chromium.launch(
+                  headless=True, args=stealth_args
+              )
+              ctx_chunk = browser_chunk.new_context(
+                  user_agent=(
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                      " AppleWebKit/537.36 (KHTML, like Gecko)"
+                      " Chrome/122.0.0.0 Safari/537.36"
+                  ),
+                  viewport={"width": 1366, "height": 768},
+                  locale="en-US",
+              )
+              page_chunk = ctx_chunk.new_page()
+              page_chunk.set_default_timeout(30000)
+
+              chunk_results = scrape_ttb(
+                  page_chunk, start_date, end_date, clean_ttb_terms
+              )
+              if chunk_results:
+                raw_ttb_data.extend(chunk_results)
+
+              ctx_chunk.close()
+              browser_chunk.close()
+          except Exception as e:
+            st.warning(f"TTB chunk ({start_date} to {end_date}) warning: {e}")
+
+          gc.collect()
+
+        unique_ttb = {
+            item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
+        }
+        ttb_data = list(unique_ttb.values())
 
         # --- 3. GOOGLE SEARCH ---
         google_data = []
