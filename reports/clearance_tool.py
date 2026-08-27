@@ -143,20 +143,22 @@ def run():
         f"{safe_mark}-USPTO-EXPORT-{today.strftime('%Y-%m-%d')}_{timestamp}.xlsx",
     )
 
+    stealth_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+    ]
+
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (Only Playwright Context) ---
+        # --- 1. USPTO SEARCH ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
             browser1 = p1.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    '--js-flags="--max-old-space-size=256"',
-                ],
+                args=stealth_args + ['--js-flags="--max-old-space-size=256"'],
             )
             ctx1 = browser1.new_context(
                 user_agent=(
@@ -181,22 +183,48 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (Fast HTTP Requests - Zero Playwright RAM) ---
-        ttb_data = []
-        try:
-          start_date = "01/01/1985"
-          end_date = today.strftime("%m/%d/%Y")
+        # --- 2. TTB COLA SEARCH (ISOLATED FRESH BROWSER PER CHUNK) ---
+        ttb_chunks = [
+            ("01/01/2018", today.strftime("%m/%d/%Y")),
+            ("01/01/2010", "12/31/2017"),
+            ("01/01/1995", "12/31/2009"),
+        ]
+        raw_ttb_data = []
 
-          raw_ttb_data = scrape_ttb(start_date, end_date, clean_ttb_terms)
-          if raw_ttb_data:
-            unique_ttb = {
-                item["ttb_id"]: item
-                for item in raw_ttb_data
-                if "ttb_id" in item
-            }
-            ttb_data = list(unique_ttb.values())
-        except Exception as e:
-          st.warning(f"TTB COLA search warning: {e}")
+        for start_date, end_date in ttb_chunks:
+          try:
+            with sync_playwright() as p_chunk:
+              browser_chunk = p_chunk.chromium.launch(
+                  headless=True, args=stealth_args
+              )
+              ctx_chunk = browser_chunk.new_context(
+                  user_agent=(
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                      " AppleWebKit/537.36 (KHTML, like Gecko)"
+                      " Chrome/122.0.0.0 Safari/537.36"
+                  ),
+                  viewport={"width": 1280, "height": 800},
+              )
+              page_chunk = ctx_chunk.new_page()
+              page_chunk.set_default_timeout(25000)
+
+              chunk_results = scrape_ttb(
+                  page_chunk, start_date, end_date, clean_ttb_terms
+              )
+              if chunk_results:
+                raw_ttb_data.extend(chunk_results)
+
+              ctx_chunk.close()
+              browser_chunk.close()
+          except Exception as e:
+            st.warning(f"TTB chunk ({start_date} to {end_date}) warning: {e}")
+
+          gc.collect()
+
+        unique_ttb = {
+            item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
+        }
+        ttb_data = list(unique_ttb.values())
 
         # --- 3. GOOGLE SEARCH ---
         google_data = []
