@@ -16,13 +16,6 @@ if not os.path.exists(OUTPUT_DIR):
   os.makedirs(OUTPUT_DIR)
 
 
-def block_heavy_assets(route):
-  if route.request.resource_type in ["image", "font", "media"]:
-    route.abort()
-  else:
-    route.continue_()
-
-
 def run():
   st.header("Full Trademark Clearance Search")
   st.write(
@@ -146,7 +139,7 @@ def run():
 
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (Isolated Playwright Session) ---
+        # --- 1. USPTO SEARCH (Playwright Browser Session) ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
@@ -168,8 +161,7 @@ def run():
                 accept_downloads=True,
             )
             page1 = ctx1.new_page()
-            page1.set_default_timeout(25000)
-            page1.route("**/*", block_heavy_assets)
+            page1.set_default_timeout(30000)
 
             uspto_data = scrape_uspto(
                 page1,
@@ -182,10 +174,9 @@ def run():
         except Exception as e:
           st.warning(f"USPTO scraping warning: {e}")
 
-        # Reclaim Chromium memory completely
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (Fast HTTP Requests, Zero Playwright RAM) ---
+        # --- 2. TTB COLA SEARCH (Fast HTTP Requests) ---
         ttb_data = []
         try:
           start_date = "01/01/1985"
