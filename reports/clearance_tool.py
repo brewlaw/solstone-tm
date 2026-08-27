@@ -26,7 +26,7 @@ def run():
   if "clearance_report_data" not in st.session_state:
     st.session_state["clearance_report_data"] = None
 
-  # Initialize default values safely from session state
+  # 1. FIX: SAFELY DEFINE DEFAULTS BEFORE WIDGET DECLARATION
   def_client = st.session_state.get("client_name", "")
   def_attn = st.session_state.get("attention_name", "")
   def_email = st.session_state.get("client_email", "")
@@ -42,6 +42,7 @@ def run():
         key="clearance_attention_name",
     )
   with col2:
+    # 2. FIX: ADD CLIENT EMAIL WIDGET REQUIRED BY DOCX GENERATOR
     client_email = st.text_input(
         "Client Email:", value=def_email, key="clearance_client_email"
     )
@@ -94,7 +95,6 @@ def run():
         if raw_mark != squished_mark
         else f'"{raw_mark}"'
     )
-
     uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
     uspto_mark = (
         f"({uspto_spaced}) OR (CM2:{squished_mark}*)"
@@ -104,7 +104,7 @@ def run():
 
     clean_ttb_terms = list(set([raw_mark.strip(), squished_mark.strip()]))
 
-    # Use trailing wildcards (CM2:TERM*) to prevent ElasticSearch 100k+ hit dumps
+    # 3. FIX: REMOVE LEADING WILDCARDS (CM2:*TERM*) THAT CAUSE 100K+ RECORD MEMORY CRASHES
     secondary_terms = []
     if dominant_term:
       web_mark_base += f' OR "{dominant_term}"'
@@ -144,7 +144,7 @@ def run():
         "Scraping USPTO, TTB, and Google... This may take a few minutes."
     ):
       try:
-        # --- 1. USPTO Search (Isolated Session) ---
+        # --- 1. RUN USPTO SEARCH (ISOLATED PLAYWRIGHT SESSION) ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
@@ -180,7 +180,7 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA Search (Isolated Session) ---
+        # --- 2. RUN TTB SEARCH (ISOLATED PLAYWRIGHT SESSION) ---
         ttb_data = []
         try:
           with sync_playwright() as p2:
@@ -203,7 +203,8 @@ def run():
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                     " AppleWebKit/537.36"
-                )
+                ),
+                accept_downloads=True,
             )
 
             for start_date, end_date in ttb_chunks:
@@ -235,7 +236,7 @@ def run():
 
         gc.collect()
 
-        # --- 3. Google Search ---
+        # --- 3. RUN GOOGLE SEARCH ---
         google_data = []
         try:
           google_date_from = "1900-01-01"
@@ -246,7 +247,7 @@ def run():
         except Exception as e:
           st.warning(f"Google web search warning: {e}")
 
-        # --- Report Generation ---
+        # --- REPORT GENERATION ---
         base_filename = f"Clearance_Report_{safe_mark}"
         report_title = f"Clearance Report - {raw_mark.upper()}"
         pdf_filename = os.path.join(OUTPUT_DIR, f"{base_filename}.pdf")
