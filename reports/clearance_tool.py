@@ -100,25 +100,31 @@ def run():
         else uspto_spaced
     )
 
-    clean_ttb_terms = list(set([raw_mark.strip(), squished_mark.strip()]))
+    # Reconstruct SQL wildcards for TTB search
+    ttb_marks_list = ["%" + "%".join(words) + "%"]
 
     secondary_terms = []
     if dominant_term:
       web_mark_base += f' OR "{dominant_term}"'
       secondary_terms.append(f"(CM2:{dominant_term}*)")
-      clean_ttb_terms.append(dominant_term)
+      ttb_marks_list.append(f"%{dominant_term}%")
     if phonetic_term:
       web_mark_base += f' OR "{phonetic_term}"'
       secondary_terms.append(f"(CM2:{phonetic_term}*)")
-      clean_ttb_terms.append(phonetic_term)
+      ttb_marks_list.append(f"%{phonetic_term}%")
     if conceptual_term:
       web_mark_base += f' OR "{conceptual_term}"'
       secondary_terms.append(f"(CM2:{conceptual_term}*)")
-      clean_ttb_terms.append(conceptual_term)
+      ttb_marks_list.append(f"%{conceptual_term}%")
     if substring_term:
       web_mark_base += f' OR "{substring_term}"'
       secondary_terms.append(f"(CM2:{substring_term}*)")
-      clean_ttb_terms.append(substring_term)
+      ttb_marks_list.append(f"%{substring_term}%")
+
+    # Combine wildcard terms and plain text fallbacks
+    all_ttb_terms = list(
+        dict.fromkeys(ttb_marks_list + [raw_mark.strip(), squished_mark.strip()])
+    )
 
     class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
     date_filter = ""
@@ -139,7 +145,7 @@ def run():
 
     with st.spinner("Scraping USPTO, TTB, and Google..."):
       try:
-        # --- 1. USPTO SEARCH (Isolated Playwright Session) ---
+        # --- 1. USPTO SEARCH (Isolated Session) ---
         uspto_data = []
         try:
           with sync_playwright() as p1:
@@ -149,7 +155,6 @@ def run():
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--single-process",
                     '--js-flags="--max-old-space-size=256"',
                 ],
             )
@@ -176,7 +181,7 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (Isolated Playwright Session) ---
+        # --- 2. TTB COLA SEARCH (Isolated Session with 3 Date Chunks) ---
         ttb_chunks = [
             ("01/01/2018", today.strftime("%m/%d/%Y")),
             ("01/01/2010", "12/31/2017"),
@@ -204,10 +209,10 @@ def run():
             for start_date, end_date in ttb_chunks:
               try:
                 page2 = ctx2.new_page()
-                page2.set_default_timeout(20000)
+                page2.set_default_timeout(30000)
 
                 chunk_results = scrape_ttb(
-                    page2, start_date, end_date, clean_ttb_terms
+                    page2, start_date, end_date, all_ttb_terms
                 )
                 if chunk_results:
                   raw_ttb_data.extend(chunk_results)
