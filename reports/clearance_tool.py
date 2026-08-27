@@ -11,10 +11,20 @@ from scrapers.google_scraper import scrape_google
 from scrapers.ttb_scraper import scrape_ttb
 from scrapers.uspto_scraper import scrape_uspto
 
+import requests
+import streamlit as st
+
+
 OUTPUT_DIR = "outputs"
 if not os.path.exists(OUTPUT_DIR):
   os.makedirs(OUTPUT_DIR)
 
+resp = requests.get(
+    "https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do",
+    headers={"User-Agent": "Mozilla/5.0"},
+)
+st.write(f"TTB HTTP Status: {resp.status_code}")
+st.write(f"Page Sample: {resp.text[:300]}")
 
 def run():
   st.header("Full Trademark Clearance Search")
