@@ -84,6 +84,11 @@ def run():
       st.error("Please enter a trademark name.")
       return
 
+    # Delete old screenshot if exists
+    debug_img_path = os.path.join(OUTPUT_DIR, "ttb_debug.png")
+    if os.path.exists(debug_img_path):
+      os.remove(debug_img_path)
+
     squished_mark = raw_mark.replace(" ", "")
     today = datetime.datetime.now()
 
@@ -143,7 +148,14 @@ def run():
         f"{safe_mark}-USPTO-EXPORT-{today.strftime('%Y-%m-%d')}_{timestamp}.xlsx",
     )
 
-    with st.spinner("Scraping USPTO, TTB, and Google..."):
+    stealth_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+    ]
+
+    with st.spinner("Running diagnostic search & taking screenshot..."):
       try:
         # --- 1. USPTO SEARCH ---
         uspto_data = []
@@ -151,12 +163,7 @@ def run():
           with sync_playwright() as p1:
             browser1 = p1.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    '--js-flags="--max-old-space-size=256"',
-                ],
+                args=stealth_args + ['--js-flags="--max-old-space-size=256"'],
             )
             ctx1 = browser1.new_context(
                 user_agent=(
@@ -166,7 +173,7 @@ def run():
                 accept_downloads=True,
             )
             page1 = ctx1.new_page()
-            page1.set_default_timeout(30000)
+            page1.set_default_timeout(25000)
 
             uspto_data = scrape_uspto(
                 page1,
@@ -181,22 +188,33 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (Fast TLS Impersonation via curl_cffi) ---
+        # --- 2. TTB DIAGNOSTIC PLAYWRIGHT RUN ---
         ttb_data = []
         try:
-          start_date = "01/01/1985"
-          end_date = today.strftime("%m/%d/%Y")
+          with sync_playwright() as p2:
+            browser2 = p2.chromium.launch(headless=True, args=stealth_args)
+            ctx2 = browser2.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    " AppleWebKit/537.36 (KHTML, like Gecko)"
+                    " Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+            page2 = ctx2.new_page()
+            page2.set_default_timeout(35000)
 
-          raw_ttb_data = scrape_ttb(start_date, end_date, clean_ttb_terms)
-          if raw_ttb_data:
-            unique_ttb = {
-                item["ttb_id"]: item
-                for item in raw_ttb_data
-                if "ttb_id" in item
-            }
-            ttb_data = list(unique_ttb.values())
+            start_date = "01/01/2018"
+            end_date = today.strftime("%m/%d/%Y")
+
+            ttb_data = scrape_ttb(page2, start_date, end_date, clean_ttb_terms)
+
+            ctx2.close()
+            browser2.close()
         except Exception as e:
-          st.warning(f"TTB COLA search warning: {e}")
+          st.warning(f"TTB diagnostic run warning: {e}")
+
+        gc.collect()
 
         # --- 3. GOOGLE SEARCH ---
         google_data = []
@@ -256,6 +274,20 @@ def run():
 
       except Exception as e:
         st.error(f"Error during search execution: {e}")
+
+  # --- DISPLAY LIVE TTB BROWSER SNAPSHOT IF GENERATED ---
+  debug_img_path = os.path.join(OUTPUT_DIR, "ttb_debug.png")
+  if os.path.exists(debug_img_path):
+    st.markdown("---")
+    st.subheader("📸 Live TTB Browser Snapshot")
+    st.image(
+        debug_img_path,
+        caption=(
+            "This screenshot shows exactly what Playwright saw on TTB.gov after"
+            " form submission."
+        ),
+        use_container_width=True,
+    )
 
   # --- DISPLAY OUTPUTS ---
   if st.session_state.get("clearance_report_data"):

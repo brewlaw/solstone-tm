@@ -1,155 +1,80 @@
 import logging
-import re
-from bs4 import BeautifulSoup
-from curl_cffi import requests
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
 
-def scrape_ttb(ttb_date_from, ttb_date_to, mark_list):
-  """Scrapes TTB COLA Registry by spoofing Chrome's TLS fingerprint with curl_cffi to bypass Akamai Bot Manager."""
+def scrape_ttb(page, ttb_date_from, ttb_date_to, mark_list):
+  """Submits TTB search and saves a full-page debug screenshot."""
   ttb_results = []
-  seen_ttb_ids = set()
-
-  if isinstance(mark_list, str):
-    mark_list = [mark_list]
-
-  if not mark_list:
+  if not mark_list or not page:
     return ttb_results
 
-  clean_terms = list(
-      dict.fromkeys([str(m).strip() for m in mark_list if str(m).strip()])
+  clean_terms = (
+      [mark_list]
+      if isinstance(mark_list, str)
+      else [str(m).strip() for m in mark_list if str(m).strip()]
   )
+  target_term = clean_terms[0] if clean_terms else "WINGMAN"
 
-  # Impersonate Chrome 120 browser TLS fingerprint at socket layer
-  session = requests.Session(impersonate="chrome120")
+  os.makedirs("outputs", exist_ok=True)
+  debug_path = "outputs/ttb_debug.png"
 
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      ),
-      "Accept": (
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-      ),
-      "Accept-Language": "en-US,en;q=0.9",
-      "Referer": (
-          "https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do"
-      ),
-      "Origin": "https://www.ttbonline.gov",
-  }
-
-  # Step 1: Establish TLS Session
   try:
-    session.get(
+    logger.info(f"Navigating to TTB for diagnostic run ('{target_term}')...")
+    page.goto(
         "https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do",
-        headers=headers,
-        timeout=15,
+        timeout=30000,
+        wait_until="domcontentloaded",
     )
-  except Exception as e:
-    logger.warning(f"TTB session init warning: {e}")
 
-  post_url = "https://www.ttbonline.gov/colasonline/publicSearchColasBasicProcess.do?action=search"
+    # Dismiss modal if present
+    if page.locator("input[value='I Agree']").is_visible():
+      page.locator("input[value='I Agree']").evaluate("node => node.click()")
+      page.wait_for_timeout(1000)
 
-  for mark in clean_terms:
-    if not mark:
-      continue
-
+    # Fill form
     try:
-      logger.info(f"Submitting TTB search for '{mark}' via curl_cffi...")
-      payload = {
-          "searchCriteria.dateCompletedFrom": ttb_date_from,
-          "searchCriteria.dateCompletedTo": ttb_date_to,
-          "searchCriteria.productOrFancifulName": mark,
-          "searchCriteria.brandFancifulEq": (
-              "E"  # 'E' = Either Brand or Fanciful Name
-          ),
-          "action": "search",
-      }
-
-      resp = session.post(post_url, data=payload, headers=headers, timeout=20)
-
-      if resp.status_code != 200:
-        logger.warning(
-            f"TTB returned status code {resp.status_code} for '{mark}'"
-        )
-        continue
-
-      # Step 2: Parse returned HTML table
-      soup = BeautifulSoup(resp.text, "html.parser")
-      rows = soup.find_all("tr")
-
-      variation_count = 0
-      for row in rows:
-        row_text = row.get_text(strip=True)
-        if (
-            "TTB ID" in row_text
-            or "Total Matching" in row_text
-            or "Brand Name" in row_text
-        ):
-          continue
-
-        cols = [td.get_text(strip=True) for td in row.find_all("td")]
-        if len(cols) < 2:
-          continue
-
-        # Extract TTB ID from link parameters or table cells
-        ttb_id = None
-        for a in row.find_all("a", href=True):
-          href = a["href"]
-          link_text = a.get_text(strip=True)
-          m = re.search(r"ttbid=(\d+)", href, re.IGNORECASE)
-          if m:
-            ttb_id = m.group(1)
-            break
-          if link_text.isdigit() and len(link_text) >= 8:
-            ttb_id = link_text
-            break
-
-        if not ttb_id:
-          for cell in cols:
-            c_clean = cell.replace("-", "").strip()
-            if c_clean.isdigit() and len(c_clean) >= 8:
-              ttb_id = c_clean
-              break
-
-        if not ttb_id and len(cols) >= 3:
-          ttb_id = f"COLA_{abs(hash(''.join(cols))) % 100000000}"
-
-        if ttb_id and ttb_id not in seen_ttb_ids:
-          seen_ttb_ids.add(ttb_id)
-          variation_count += 1
-
-          date_match = re.search(r"\b\d{2}/\d{2}/\d{4}\b", row_text)
-          approval_dt = date_match.group(0) if date_match else ttb_date_from
-
-          fanciful_nm = cols[0] if len(cols) > 0 else "N/A"
-          brand_nm = cols[1] if len(cols) > 1 else fanciful_nm
-          origin_desc = cols[3] if len(cols) > 3 else "N/A"
-          class_desc_val = (
-              f"{cols[4]} - {cols[5]}"
-              if len(cols) > 5
-              else (cols[4] if len(cols) > 4 else "N/A")
-          )
-
-          ttb_results.append({
-              "ttb_id": ttb_id,
-              "approval_date": approval_dt,
-              "issue_date": approval_dt,
-              "fanciful_name": fanciful_nm,
-              "brand_name": brand_nm,
-              "origin_desc": origin_desc,
-              "class_desc": class_desc_val,
-              "search_term": mark,
-          })
-
-      logger.info(
-          f"Successfully scraped {variation_count} records for '{mark}' via"
-          " curl_cffi!"
+      page.locator("input[name='searchCriteria.dateCompletedFrom']").fill(
+          ttb_date_from
       )
+      page.locator("input[name='searchCriteria.dateCompletedTo']").fill(
+          ttb_date_to
+      )
+      page.locator("input[name='searchCriteria.productOrFancifulName']").fill(
+          target_term
+      )
+    except Exception:
+      if page.locator("#productname").is_visible():
+        page.locator("#datecompletedfrom").fill(ttb_date_from)
+        page.locator("#datecompletedto").fill(ttb_date_to)
+        page.locator("#productname").fill(target_term)
 
-    except Exception as e:
-      logger.warning(f"TTB curl_cffi error for '{mark}': {e}")
-      continue
+    # Select 'Either'
+    try:
+      page.locator("input[value='E']").evaluate("node => node.click()")
+    except Exception:
+      pass
+
+    page.wait_for_timeout(500)
+
+    # Submit search
+    search_btn = page.locator(
+        "input[value='Search'], input[alt*='search'], input[type='submit']"
+    ).first
+    search_btn.evaluate("node => node.click()")
+
+    # Wait for response and capture full-page screenshot
+    page.wait_for_timeout(5000)
+    page.screenshot(path=debug_path, full_page=True)
+    logger.info(f"Successfully saved TTB debug screenshot to {debug_path}")
+
+  except Exception as e:
+    logger.warning(f"Error capturing TTB debug screenshot: {e}")
+    try:
+      page.screenshot(path=debug_path, full_page=True)
+    except Exception:
+      pass
 
   return ttb_results
