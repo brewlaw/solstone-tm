@@ -5,75 +5,80 @@ logger = logging.getLogger(__name__)
 
 
 def scrape_ttb(page, start_date, end_date, brand_terms):
-  """Scrapes TTB Public COLA Registry using Playwright with wildcard query support."""
+  """Scrapes TTB Public COLA Registry with term-level error isolation."""
   results = []
   if not brand_terms or not page:
     return results
 
-  # Clean duplicates while keeping wildcards
-  formatted_terms = []
+  # Clean terms while keeping unique queries
+  clean_terms = []
   for term in brand_terms:
     t = str(term).strip()
-    if t and t not in formatted_terms:
-      formatted_terms.append(t)
+    if t and t not in clean_terms:
+      clean_terms.append(t)
 
-  if not formatted_terms:
+  if not clean_terms:
     return results
 
   ttb_url = "https://www.ttbonline.gov/colasonline/publicSearchColasAdvanced.do"
 
-  for term in formatted_terms:
+  for term in clean_terms:
     try:
       logger.info(
           f"Navigating to TTB for term '{term}' ({start_date} - {end_date})..."
       )
-      page.goto(ttb_url, timeout=30000, wait_until="domcontentloaded")
+      page.goto(ttb_url, timeout=20000, wait_until="domcontentloaded")
 
-      # Wait for input field on Advanced Search
-      page.wait_for_selector(
-          "input[name='searchCriteria.brandName'], input[name='brandName'],"
-          " input[name='searchCriteria.productName']",
-          timeout=15000,
-      )
+      # Find Brand Name or Product Name field
+      target_field = None
+      for selector in [
+          "input[name='searchCriteria.brandName']",
+          "input[name='brandName']",
+          "input[name='searchCriteria.productName']",
+          "input[name='productName']",
+      ]:
+        if page.query_selector(selector):
+          target_field = selector
+          break
 
-      # Target the brand name input field
-      if page.query_selector("input[name='searchCriteria.brandName']"):
-        target_field = "input[name='searchCriteria.brandName']"
-      elif page.query_selector("input[name='brandName']"):
-        target_field = "input[name='brandName']"
-      else:
-        target_field = "input[name='searchCriteria.productName']"
+      if not target_field:
+        logger.warning(f"Could not find input selector on TTB for '{term}'")
+        continue
 
       page.fill(target_field, term)
 
-      # Fill Date Range fields
-      date_from_sel = "input[name='searchCriteria.issueDateFrom']"
-      date_to_sel = "input[name='searchCriteria.issueDateTo']"
+      # Fill Issue Date range
+      if page.query_selector("input[name='searchCriteria.issueDateFrom']"):
+        page.fill("input[name='searchCriteria.issueDateFrom']", start_date)
+      elif page.query_selector("input[name='issueDateFrom']"):
+        page.fill("input[name='issueDateFrom']", start_date)
 
-      if page.query_selector(date_from_sel):
-        page.fill(date_from_sel, start_date)
-      if page.query_selector(date_to_sel):
-        page.fill(date_to_sel, end_date)
+      if page.query_selector("input[name='searchCriteria.issueDateTo']"):
+        page.fill("input[name='searchCriteria.issueDateTo']", end_date)
+      elif page.query_selector("input[name='issueDateTo']"):
+        page.fill("input[name='issueDateTo']", end_date)
 
-      # Submit the search form
-      submit_btn = (
-          "input[name='search']"
-          if page.query_selector("input[name='search']")
-          else "input[type='submit']"
+      # Submit form
+      submit_btn = page.query_selector(
+          "input[name='search'], input[type='submit'], input[value='Search']"
       )
-      page.click(submit_btn)
+      if submit_btn:
+        submit_btn.click()
+      else:
+        page.focus(target_field)
+        page.keyboard.press("Enter")
 
-      # Wait up to 25 seconds for TTB database response
+      # Wait for result table or response
       try:
         page.wait_for_selector(
             "table.searchResultsTable, table[summary*='search results'], table"
             " tr td",
-            timeout=25000,
+            timeout=15000,
         )
       except Exception:
         logger.info(
-            f"TTB search for '{term}' ({start_date}-{end_date}) yielded no"
-            " table within timeout."
+            f"No results table loaded for term '{term}' ({start_date} -"
+            f" {end_date})"
         )
         continue
 
@@ -88,7 +93,6 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
           col_texts = [c.inner_text().strip() for c in cols]
           first_cell = col_texts[0]
 
-          # Extract TTB ID from first cell or from link inside row
           ttb_id = None
           if first_cell and (
               first_cell.isdigit()
@@ -104,7 +108,6 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
                 ttb_id = m.group(1)
 
           if ttb_id:
-            # Map columns according to TTB results table layout
             brand_name = (
                 col_texts[3]
                 if len(col_texts) > 3
@@ -121,7 +124,7 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
                 else (col_texts[3] if len(col_texts) > 3 else "")
             )
 
-            # Search full row text for MM/DD/YYYY date
+            # Search row text for date pattern
             row_full_text = " ".join(col_texts)
             issue_date = ""
             date_match = re.search(r"\b\d{2}/\d{2}/\d{4}\b", row_full_text)
@@ -138,7 +141,7 @@ def scrape_ttb(page, start_date, end_date, brand_terms):
             })
 
     except Exception as e:
-      logger.warning(f"TTB scraping exception for term '{term}': {e}")
+      logger.warning(f"Error scraping TTB for term '{term}': {e}")
       continue
 
   return results

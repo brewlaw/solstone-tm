@@ -121,9 +121,10 @@ def run():
       secondary_terms.append(f"(CM2:{substring_term}*)")
       ttb_marks_list.append(f"%{substring_term}%")
 
-    # Combine wildcard terms and plain text fallbacks
     all_ttb_terms = list(
-        dict.fromkeys(ttb_marks_list + [raw_mark.strip(), squished_mark.strip()])
+        dict.fromkeys(
+            ttb_marks_list + [raw_mark.strip(), squished_mark.strip()]
+        )
     )
 
     class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
@@ -181,7 +182,7 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB COLA SEARCH (Isolated Session with 3 Date Chunks) ---
+        # --- 2. TTB COLA SEARCH (ISOLATED FRESH SESSION PER CHUNK) ---
         ttb_chunks = [
             ("01/01/2018", today.strftime("%m/%d/%Y")),
             ("01/01/2010", "12/31/2017"),
@@ -189,46 +190,38 @@ def run():
         ]
         raw_ttb_data = []
 
-        try:
-          with sync_playwright() as p2:
-            browser2 = p2.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-            )
-            ctx2 = browser2.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                    " AppleWebKit/537.36"
-                )
-            )
+        for start_date, end_date in ttb_chunks:
+          try:
+            with sync_playwright() as p_chunk:
+              browser_chunk = p_chunk.chromium.launch(
+                  headless=True,
+                  args=[
+                      "--no-sandbox",
+                      "--disable-dev-shm-usage",
+                      "--disable-gpu",
+                  ],
+              )
+              ctx_chunk = browser_chunk.new_context(
+                  user_agent=(
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                      " AppleWebKit/537.36"
+                  )
+              )
+              page_chunk = ctx_chunk.new_page()
+              page_chunk.set_default_timeout(20000)
 
-            for start_date, end_date in ttb_chunks:
-              try:
-                page2 = ctx2.new_page()
-                page2.set_default_timeout(30000)
+              chunk_results = scrape_ttb(
+                  page_chunk, start_date, end_date, all_ttb_terms
+              )
+              if chunk_results:
+                raw_ttb_data.extend(chunk_results)
 
-                chunk_results = scrape_ttb(
-                    page2, start_date, end_date, all_ttb_terms
-                )
-                if chunk_results:
-                  raw_ttb_data.extend(chunk_results)
+              ctx_chunk.close()
+              browser_chunk.close()
+          except Exception as e:
+            st.warning(f"TTB chunk ({start_date} to {end_date}) warning: {e}")
 
-                page2.close()
-              except Exception as e:
-                st.warning(
-                    f"TTB chunk ({start_date} to {end_date}) warning: {e}"
-                )
-
-            ctx2.close()
-            browser2.close()
-        except Exception as e:
-          st.warning(f"TTB COLA search warning: {e}")
-
-        gc.collect()
+          gc.collect()
 
         unique_ttb = {
             item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
