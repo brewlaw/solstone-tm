@@ -10,3 +10,4 @@ google-auth
 reportlab
 pypdf
 beautifulsoup4
+curl_cffi
