@@ -12,101 +12,8 @@ from scrapers.ttb_scraper import scrape_ttb
 from scrapers.uspto_scraper import scrape_uspto
 
 OUTPUT_DIR = "outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-def run_standalone_ttb_test():
-  """Runs ONLY the TTB Playwright session and renders a screenshot immediately."""
-  debug_path = os.path.join(OUTPUT_DIR, "ttb_debug.png")
-  if os.path.exists(debug_path):
-    os.remove(debug_path)
-
-  st.info("Starting isolated Playwright session for TTB...")
-
-  stealth_args = [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-blink-features=AutomationControlled",
-  ]
-
-  try:
-    with sync_playwright() as p:
-      st.write("1. Launching Chromium...")
-      browser = p.chromium.launch(headless=True, args=stealth_args)
-      ctx = browser.new_context(
-          user_agent=(
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-              " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-          ),
-          viewport={"width": 1280, "height": 800},
-      )
-      page = ctx.new_page()
-      page.set_default_timeout(30000)
-
-      st.write(
-          "2. Navigating to TTB"
-          " (https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do)..."
-      )
-      page.goto(
-          "https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do",
-          timeout=30000,
-          wait_until="domcontentloaded",
-      )
-
-      # Handle disclaimer modal if present
-      if page.locator("input[value='I Agree']").is_visible():
-        st.write("3. Clicking 'I Agree' modal...")
-        page.locator("input[value='I Agree']").evaluate("node => node.click()")
-        page.wait_for_timeout(1000)
-
-      st.write("4. Filling test search term ('WINGMAN')...")
-      try:
-        page.locator("input[name='searchCriteria.dateCompletedFrom']").fill(
-            "01/01/2020"
-        )
-        page.locator("input[name='searchCriteria.dateCompletedTo']").fill(
-            "08/26/2026"
-        )
-        page.locator("input[name='searchCriteria.productOrFancifulName']").fill(
-            "%WINGMAN%"
-        )
-      except Exception:
-        if page.locator("#productname").is_visible():
-          page.locator("#datecompletedfrom").fill("01/01/2020")
-          page.locator("#datecompletedto").fill("08/26/2026")
-          page.locator("#productname").fill("%WINGMAN%")
-
-      try:
-        page.locator("input[value='E']").evaluate("node => node.click()")
-      except Exception:
-        pass
-
-      page.wait_for_timeout(500)
-
-      st.write("5. Clicking Search button...")
-      search_btn = page.locator(
-          "input[value='Search'], input[alt*='search'], input[type='submit']"
-      ).first
-      search_btn.evaluate("node => node.click()")
-
-      st.write("6. Waiting 5 seconds and capturing screenshot...")
-      page.wait_for_timeout(5000)
-      page.screenshot(path=debug_path, full_page=True)
-
-      ctx.close()
-      browser.close()
-
-    st.success("Screenshot captured successfully!")
-    st.image(
-        debug_path,
-        caption="Live TTB Browser Snapshot",
-        use_container_width=True,
-    )
-
-  except Exception as e:
-    st.error(f"Playwright failed during TTB test: {e}")
-    st.exception(e)
+if not os.path.exists(OUTPUT_DIR):
+  os.makedirs(OUTPUT_DIR)
 
 
 def run():
@@ -115,15 +22,6 @@ def run():
       "Run a comprehensive, all-time clearance search across USPTO, TTB, and"
       " Google."
   )
-
-  # --- STANDALONE TEST PANEL ---
-  with st.expander("📸 TTB Diagnostic Tools", expanded=True):
-    st.caption(
-        "Click this button to test Playwright against TTB in isolation and"
-        " force an immediate screenshot."
-    )
-    if st.button("📸 Run Direct TTB Screenshot Test", key="btn_direct_ttb_test"):
-      run_standalone_ttb_test()
 
   if "clearance_report_data" not in st.session_state:
     st.session_state["clearance_report_data"] = None
@@ -270,7 +168,7 @@ def run():
                 accept_downloads=True,
             )
             page1 = ctx1.new_page()
-            page1.set_default_timeout(25000)
+            page1.set_default_timeout(30000)
 
             uspto_data = scrape_uspto(
                 page1,
@@ -285,32 +183,23 @@ def run():
 
         gc.collect()
 
-        # --- 2. TTB SEARCH ---
+        # --- 2. TTB COLA SEARCH (Fast Direct HTTP Request) ---
         ttb_data = []
         try:
-          with sync_playwright() as p2:
-            browser2 = p2.chromium.launch(headless=True, args=stealth_args)
-            ctx2 = browser2.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                    " AppleWebKit/537.36 (KHTML, like Gecko)"
-                    " Chrome/122.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-            )
-            page2 = ctx2.new_page()
-            page2.set_default_timeout(35000)
+          start_date = "01/01/1985"
+          end_date = today.strftime("%m/%d/%Y")
 
-            start_date = "01/01/2018"
-            end_date = today.strftime("%m/%d/%Y")
-
-            ttb_data = scrape_ttb(page2, start_date, end_date, clean_ttb_terms)
-
-            ctx2.close()
-            browser2.close()
+          raw_ttb_data = scrape_ttb(start_date, end_date, clean_ttb_terms)
+          if raw_ttb_data:
+            unique_ttb = {
+                item["ttb_id"]: item
+                for item in raw_ttb_data
+                if "ttb_id" in item
+            }
+            ttb_data = list(unique_ttb.values())
         except Exception as e:
-          st.warning(f"TTB search warning: {e}")
-
+          st.warning(f"TTB COLA search warning: {e}")
+          
         gc.collect()
 
         # --- 3. GOOGLE SEARCH ---
