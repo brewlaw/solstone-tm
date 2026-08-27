@@ -26,7 +26,6 @@ def run():
   if "clearance_report_data" not in st.session_state:
     st.session_state["clearance_report_data"] = None
 
-  # Initialize default values safely from session state
   def_client = st.session_state.get("client_name", "")
   def_attn = st.session_state.get("attention_name", "")
   def_email = st.session_state.get("client_email", "")
@@ -94,6 +93,7 @@ def run():
         if raw_mark != squished_mark
         else f'"{raw_mark}"'
     )
+
     uspto_spaced = " AND ".join([f"CM2:{w}*" for w in words])
     uspto_mark = (
         f"({uspto_spaced}) OR (CM2:{squished_mark}*)"
@@ -101,25 +101,26 @@ def run():
         else uspto_spaced
     )
 
-    # Use clean, targeted terms for TTB to avoid hitting TTB's 500-record cap error page
     clean_ttb_terms = list(set([raw_mark.strip(), squished_mark.strip()]))
 
+    # Use trailing wildcards (CM2:TERM*) instead of leading wildcards (CM2:*TERM*)
+    # to avoid triggering 100k+ ElasticSearch hit dumps at USPTO
     secondary_terms = []
     if dominant_term:
       web_mark_base += f' OR "{dominant_term}"'
-      secondary_terms.append(f"(CM2:*{dominant_term}*)")
+      secondary_terms.append(f"(CM2:{dominant_term}*)")
       clean_ttb_terms.append(dominant_term)
     if phonetic_term:
       web_mark_base += f' OR "{phonetic_term}"'
-      secondary_terms.append(f"(CM2:*{phonetic_term}*)")
+      secondary_terms.append(f"(CM2:{phonetic_term}*)")
       clean_ttb_terms.append(phonetic_term)
     if conceptual_term:
       web_mark_base += f' OR "{conceptual_term}"'
-      secondary_terms.append(f"(CM2:*{conceptual_term}*)")
+      secondary_terms.append(f"(CM2:{conceptual_term}*)")
       clean_ttb_terms.append(conceptual_term)
     if substring_term:
       web_mark_base += f' OR "{substring_term}"'
-      secondary_terms.append(f"(CM2:*{substring_term}*)")
+      secondary_terms.append(f"(CM2:{substring_term}*)")
       clean_ttb_terms.append(substring_term)
 
     class_filter = ' AND IC:("030" OR "032" OR "033" OR "043")'
@@ -143,24 +144,21 @@ def run():
         "Scraping USPTO, TTB, and Google... This may take a few minutes."
     ):
       try:
-        with sync_playwright() as p:
-          # Single Chromium browser instance to prevent memory leaks on Streamlit Cloud
-          browser = p.chromium.launch(
-              headless=True,
-              args=[
-                  "--no-sandbox",
-                  "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage",
-                  "--disable-gpu",
-                  "--single-process",
-                  '--js-flags="--max-old-space-size=256"',
-              ],
-          )
-
-          # --- 1. USPTO Search ---
-          uspto_data = []
-          try:
-            context1 = browser.new_context(
+        # --- 1. USPTO Search (Isolated Session) ---
+        uspto_data = []
+        try:
+          with sync_playwright() as p1:
+            browser1 = p1.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                    '--js-flags="--max-old-space-size=256"',
+                ],
+            )
+            context1 = browser1.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                     " AppleWebKit/537.36"
@@ -176,50 +174,66 @@ def run():
                 secondary_uspto_query,
             )
             context1.close()
-          except Exception as e:
-            st.warning(f"USPTO scraping warning: {e}")
+            browser1.close()
+        except Exception as e:
+          st.warning(f"USPTO scraping warning: {e}")
 
-          # --- 2. TTB COLA Search ---
-          ttb_chunks = [
-              ("01/01/1995", "12/31/2009"),
-              ("01/01/2010", "12/31/2019"),
-              ("01/01/2020", today.strftime("%m/%d/%Y")),
-          ]
-          raw_ttb_data = []
+        gc.collect()
 
-          context2 = browser.new_context(
-              user_agent=(
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                  " AppleWebKit/537.36"
-              ),
-              accept_downloads=True,
-          )
+        # --- 2. TTB COLA Search (Isolated Session) ---
+        ttb_data = []
+        try:
+          with sync_playwright() as p2:
+            browser2 = p2.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                ],
+            )
+            ttb_chunks = [
+                ("01/01/1995", "12/31/2009"),
+                ("01/01/2010", "12/31/2019"),
+                ("01/01/2020", today.strftime("%m/%d/%Y")),
+            ]
+            raw_ttb_data = []
+            context2 = browser2.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    " AppleWebKit/537.36"
+                )
+            )
 
-          for start_date, end_date in ttb_chunks:
-            try:
-              chunk_page = context2.new_page()
-              chunk_page.set_default_timeout(25000)
+            for start_date, end_date in ttb_chunks:
+              try:
+                chunk_page = context2.new_page()
+                chunk_page.set_default_timeout(25000)
+                chunk_results = scrape_ttb(
+                    chunk_page, start_date, end_date, clean_ttb_terms
+                )
+                if chunk_results:
+                  raw_ttb_data.extend(chunk_results)
+                chunk_page.close()
+              except Exception as e:
+                st.warning(
+                    f"TTB chunk ({start_date} to {end_date}) warning: {e}"
+                )
 
-              chunk_results = scrape_ttb(
-                  chunk_page, start_date, end_date, clean_ttb_terms
-              )
-              if chunk_results:
-                raw_ttb_data.extend(chunk_results)
+            context2.close()
+            browser2.close()
 
-              chunk_page.close()
-            except Exception as e:
-              st.warning(
-                  f"TTB chunk ({start_date} to {end_date}) warning: {e}"
-              )
+            unique_ttb = {
+                item["ttb_id"]: item
+                for item in raw_ttb_data
+                if "ttb_id" in item
+            }
+            ttb_data = list(unique_ttb.values())
+        except Exception as e:
+          st.warning(f"TTB scraping warning: {e}")
 
-          context2.close()
-          browser.close()
-          gc.collect()
-
-          unique_ttb = {
-              item["ttb_id"]: item for item in raw_ttb_data if "ttb_id" in item
-          }
-          ttb_data = list(unique_ttb.values())
+        gc.collect()
 
         # --- 3. Google Search ---
         google_data = []
