@@ -13,8 +13,14 @@ from playwright.sync_api import sync_playwright
 from scrapers.uspto_scraper import scrape_uspto
 
 def calculate_deadline(reg_date_str, status_str=""):
+    """
+    Dynamically computes the NEXT future USPTO filing window.
+    - Years 5-6: Section 8 (First Maintenance)
+    - Years 9-10, 19-20, 29-30, etc.: Section 8 & 9 (Recurring Renewals)
+    """
     if not reg_date_str or str(reg_date_str) in ["N/A", "nan", "None"] or pd.isna(reg_date_str): 
         return "Not Registered"
+    
     try:
         reg_date = pd.to_datetime(reg_date_str)
         if pd.isna(reg_date):
@@ -23,35 +29,39 @@ def calculate_deadline(reg_date_str, status_str=""):
         current_date = datetime.now()
         status_upper = str(status_str).upper() if status_str else ""
         
+        # USPTO status strings indicating completed filings
         renewed_keywords = ["RENEWED", "ACCEPTED", "COMBINED SECTION 8 & 9", "SECTION 8 & 15", "REGISTERED AND RENEWED"]
         is_explicitly_renewed = any(kw in status_upper for kw in renewed_keywords)
 
-        # 1. Section 8 Maintenance Window (5th to 6th Year)
+        # 1. First Maintenance Window: Section 8 (5th to 6th Year)
         sec8_start = reg_date + relativedelta(years=5)
         sec8_end = reg_date + relativedelta(years=6)
 
         if current_date < sec8_end:
             if sec8_start <= current_date < sec8_end:
                 if is_explicitly_renewed:
-                    pass  # Advanced early -> move to Section 8 & 9
+                    pass  # Filed early -> advance to Section 8 & 9 cycle
                 else:
                     return f"Sec 8: {sec8_start.strftime('%Y-%m-%d')} to {sec8_end.strftime('%Y-%m-%d')}"
             else:
                 return f"Sec 8: {sec8_start.strftime('%Y-%m-%d')} to {sec8_end.strftime('%Y-%m-%d')}"
 
-        # 2. Recurring 10-Year Renewal Windows: Section 8 & 9 (Years 9-10, 19-20, 29-30...)
+        # 2. Recurring 10-Year Renewal Windows: Section 8 & 9 (Years 9-10, 19-20, 29-30, etc.)
         k = 1
         while True:
             sec89_start = reg_date + relativedelta(years=(10 * k - 1))
             sec89_end = reg_date + relativedelta(years=(10 * k))
 
+            # If current date is past the window end, the live mark completed this renewal
             if current_date >= sec89_end:
                 k += 1
                 continue
 
+            # Upcoming renewal window
             if current_date < sec89_start:
                 return f"Sec 8 & 9: {sec89_start.strftime('%Y-%m-%d')} to {sec89_end.strftime('%Y-%m-%d')}"
 
+            # Inside current active renewal window
             if sec89_start <= current_date < sec89_end:
                 if is_explicitly_renewed:
                     k += 1
@@ -79,6 +89,9 @@ def run():
         st.session_state['status_report_data'] = None
 
     if st.button("Generate Status Report", type="primary"):
+        # Force clear previous cached report from session state
+        st.session_state['status_report_data'] = None
+
         if not owner_name or not owner_name.strip():
             st.warning("Please enter an Owner/Applicant Name.")
             return
@@ -115,12 +128,10 @@ def run():
 
         if not raw_results:
             st.info("No live marks found matching your query.")
-            st.session_state['status_report_data'] = None
             return
 
         df = pd.DataFrame(raw_results)
 
-        # Ensure essential columns exist
         for col in ['mark', 'serial', 'reg_number', 'status', 'reg_date', 'goods']:
             if col not in df.columns:
                 df[col] = ""
@@ -129,7 +140,11 @@ def run():
             exclusions = [m.strip().upper() for m in exclude_marks.split(",") if m.strip()]
             df = df[~df['mark'].astype(str).str.upper().isin(exclusions)]
 
-        df['next_deadline'] = df.apply(lambda row: calculate_deadline(row.get('reg_date', ''), row.get('status', '')), axis=1)
+        # Explicitly recalculate and overwrite the next_deadline column
+        df['next_deadline'] = df.apply(
+            lambda row: calculate_deadline(row.get('reg_date', ''), row.get('status', '')), 
+            axis=1
+        )
 
         report_df = df[['mark', 'serial', 'reg_number', 'status', 'next_deadline', 'reg_date', 'goods']].copy()
         report_df.columns = ['Mark', 'S/N', 'R/N', 'Status', 'Next Deadline', 'Registration Date', 'Goods & Services']
@@ -235,7 +250,7 @@ def run():
             if hdr_cells[i].paragraphs[0].runs:
                 hdr_cells[i].paragraphs[0].runs[0].bold = True
 
-        # --- PROCESS ALL FILES TOGETHER ---
+        # --- PROCESS ALL FILES ---
         pdf.set_font('Arial', '', 7)
         line_height = 4
         
@@ -321,7 +336,7 @@ def run():
             if img_path and os.path.exists(img_path):
                 os.remove(img_path)
 
-        # Output Base Bytes
+        # Output File Bytes
         safe_owner = str(owner_name).replace(' ', '_') if owner_name else "report"
         proper_filename = f"Trademark_Report_{safe_owner}.pdf"
         proper_filepath = os.path.join(tempfile.gettempdir(), proper_filename)
@@ -335,7 +350,7 @@ def run():
         with open(proper_filepath_docx, "rb") as f:
             docx_bytes = f.read()
 
-        # Save to state
+        # Save freshly computed report to session state
         st.session_state['status_report_data'] = {
             'owner_name': str(owner_name) if owner_name else "",
             'ic_classes': str(ic_classes) if ic_classes else "",
@@ -350,7 +365,7 @@ def run():
             'count': len(report_df)
         }
 
-    # --- DISPLAY GENERATED REPORT ---
+    # --- DISPLAY REPORT ---
     if st.session_state.get('status_report_data'):
         data = st.session_state['status_report_data']
         st.success(f"Found {data['count']} mark(s)!")
